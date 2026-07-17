@@ -1,0 +1,21 @@
+# Private keys — never commit
+*.p8
+*.pem
+*.key
+rsa_key*
+
+# Cloudflare Worker
+cloudflare-worker/node_modules/
+cloudflare-worker/.wrangler/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Docker
+*.tar
+
+# macOS
+.DS_Store

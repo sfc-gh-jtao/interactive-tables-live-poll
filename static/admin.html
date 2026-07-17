@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Poll Admin</title>
+<style>
+  :root {
+    --bg:       #0f1117;
+    --surface:  #1a1d27;
+    --border:   #2e3347;
+    --accent:   #29b5e8;
+    --accent2:  #56d483;
+    --danger:   #e85d4a;
+    --text:     #e8ecf4;
+    --muted:    #8892a4;
+    --radius:   10px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 32px 24px;
+  }
+
+  h1 {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 0.04em;
+    margin-bottom: 28px;
+  }
+
+  h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 14px;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin-bottom: 24px;
+  }
+
+  /* Form fields */
+  label.field-label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 6px;
+    margin-top: 16px;
+  }
+
+  input[type="text"], textarea {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 10px 14px;
+    font-size: 0.95rem;
+    font-family: inherit;
+    transition: border-color 0.15s;
+  }
+  input[type="text"]:focus, textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  textarea { resize: vertical; min-height: 68px; }
+
+  /* Option rows */
+  #options-container { margin-top: 16px; }
+
+  .option-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  .option-row input { flex: 1; }
+  .option-num {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 0.8rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .btn-remove {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 6px 10px;
+    font-size: 0.85rem;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .btn-remove:hover { color: var(--danger); border-color: var(--danger); }
+
+  .btn-add {
+    background: none;
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 8px 16px;
+    font-size: 0.85rem;
+    width: 100%;
+    margin-top: 4px;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .btn-add:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* Submit */
+  .btn-activate {
+    width: 100%;
+    margin-top: 24px;
+    padding: 14px;
+    background: var(--accent);
+    color: var(--bg);
+    border: none;
+    border-radius: var(--radius);
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+    transition: opacity 0.15s;
+  }
+  .btn-activate:hover { opacity: 0.88; }
+  .btn-activate:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Status messages */
+  #status-msg {
+    margin-top: 14px;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    display: none;
+  }
+  #status-msg.success { background: #1a3a2a; color: var(--accent2); border: 1px solid #2d6b47; display: block; }
+  #status-msg.error   { background: #3a1a1a; color: var(--danger);  border: 1px solid #6b2d2d; display: block; }
+
+  /* Active question panel */
+  #active-panel { display: none; }
+
+  .question-header {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 18px;
+    line-height: 1.5;
+  }
+  .context-text { color: var(--muted); font-size: 0.9rem; margin-top: 4px; }
+
+  .option-result {
+    margin-bottom: 12px;
+  }
+  .option-result-header {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.9rem;
+    margin-bottom: 5px;
+  }
+  .option-result-label { font-weight: 500; }
+  .option-result-count { color: var(--muted); }
+  .progress-track {
+    height: 8px;
+    background: var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    border-radius: 4px;
+    background: var(--accent);
+    transition: width 0.4s ease;
+  }
+
+  .meta-row {
+    display: flex;
+    gap: 24px;
+    margin-top: 18px;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .meta-row span strong { color: var(--text); }
+
+  .refresh-note { font-size: 0.75rem; color: var(--muted); margin-top: 8px; }
+
+  /* Divider */
+  hr { border: none; border-top: 1px solid var(--border); margin: 6px 0 20px; }
+
+  /* Colors for option circles on results */
+  .c0 { background: #29b5e8; }
+  .c1 { background: #56d483; }
+  .c2 { background: #e8a229; }
+  .c3 { background: #9b59b6; }
+  .c4 { background: #e85d4a; }
+  .c5 { background: #1abc9c; }
+</style>
+</head>
+<body>
+
+<h1>POLL ADMIN</h1>
+
+<!-- Create Question -->
+<div class="card">
+  <h2>Create Question</h2>
+  <hr>
+
+  <label class="field-label" for="q-text">Question Text *</label>
+  <input type="text" id="q-text" placeholder="What is your question?">
+
+  <label class="field-label" for="q-context">Context / Hint (optional)</label>
+  <textarea id="q-context" placeholder="Any extra context shown below the question on phones..."></textarea>
+
+  <label class="field-label" for="q-category">Category (optional)</label>
+  <input type="text" id="q-category" placeholder="e.g. Product, Architecture, Fun">
+
+  <label class="field-label">Answer Options (2–6) *</label>
+  <div id="options-container"></div>
+  <button class="btn-add" id="btn-add-option" onclick="addOption()">+ Add Option</button>
+
+  <div style="display:flex;align-items:center;gap:12px;margin-top:20px;">
+    <label class="toggle-switch" for="multi-votes" style="cursor:pointer;display:flex;align-items:center;gap:10px;">
+      <div style="position:relative;">
+        <input type="checkbox" id="multi-votes" style="opacity:0;width:0;height:0;position:absolute;">
+        <div id="toggle-track" style="width:42px;height:24px;background:var(--border);border-radius:12px;transition:background 0.2s;"></div>
+        <div id="toggle-thumb" style="position:absolute;top:3px;left:3px;width:18px;height:18px;background:#fff;border-radius:50%;transition:transform 0.2s;"></div>
+      </div>
+      <span style="font-size:0.9rem;color:var(--text);">Allow multiple votes per person</span>
+    </label>
+  </div>
+
+  <button class="btn-activate" id="btn-submit" onclick="submitQuestion()">Activate Question</button>
+  <div id="status-msg"></div>
+</div>
+
+<!-- Active Question -->
+<div class="card" id="active-panel">
+  <h2>Active Question</h2>
+  <hr>
+  <div id="active-content">Loading...</div>
+  <div class="refresh-note">Auto-refreshes every 3 seconds</div>
+</div>
+
+<script>
+const OPTION_COLORS = ['c0','c1','c2','c3','c4','c5'];
+let optionCount = 0;
+
+function addOption(value = '') {
+  if (optionCount >= 6) return;
+  const container = document.getElementById('options-container');
+  const idx = optionCount;
+  const row = document.createElement('div');
+  row.className = 'option-row';
+  row.id = `opt-row-${idx}`;
+  row.innerHTML = `
+    <div class="option-num ${OPTION_COLORS[idx]}">${String.fromCharCode(65 + idx)}</div>
+    <input type="text" id="opt-${idx}" placeholder="Option ${String.fromCharCode(65 + idx)}" value="${value}">
+    ${idx >= 2 ? `<button class="btn-remove" onclick="removeOption(${idx})">✕</button>` : ''}
+  `;
+  container.appendChild(row);
+  optionCount++;
+  updateAddButton();
+}
+
+function removeOption(idx) {
+  const row = document.getElementById(`opt-row-${idx}`);
+  if (row) row.remove();
+  // Re-render remaining options to keep labels sequential
+  const container = document.getElementById('options-container');
+  const inputs = container.querySelectorAll('input[type="text"]');
+  const values = Array.from(inputs).map(i => i.value);
+  container.innerHTML = '';
+  optionCount = 0;
+  values.forEach(v => addOption(v));
+}
+
+function updateAddButton() {
+  document.getElementById('btn-add-option').style.display = optionCount >= 6 ? 'none' : 'block';
+}
+
+function showStatus(msg, type) {
+  const el = document.getElementById('status-msg');
+  el.textContent = msg;
+  el.className = type;
+}
+
+async function submitQuestion() {
+  const qText = document.getElementById('q-text').value.trim();
+  const qContext = document.getElementById('q-context').value.trim();
+  const qCategory = document.getElementById('q-category').value.trim();
+
+  const container = document.getElementById('options-container');
+  const inputs = container.querySelectorAll('input[type="text"]');
+  const options = Array.from(inputs).map(i => i.value.trim()).filter(Boolean);
+  const allowMultipleVotes = document.getElementById('multi-votes').checked;
+
+  if (!qText) { showStatus('Question text is required.', 'error'); return; }
+  if (options.length < 2) { showStatus('At least 2 answer options are required.', 'error'); return; }
+
+  const btn = document.getElementById('btn-submit');
+  btn.disabled = true;
+  btn.textContent = 'Activating...';
+
+  try {
+    const resp = await fetch('/api/question', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question_text: qText,
+        context_text: qContext,
+        category: qCategory,
+        options: options,
+        allow_multiple_votes: allowMultipleVotes
+      })
+    });
+    if (resp.ok) {
+      showStatus('Question activated! The dashboard and vote page have updated.', 'success');
+      document.getElementById('q-text').value = '';
+      document.getElementById('q-context').value = '';
+      document.getElementById('q-category').value = '';
+      document.getElementById('options-container').innerHTML = '';
+      optionCount = 0;
+      addOption(); addOption(); // Reset to 2 empty options
+      updateAddButton();
+      // Reset toggle
+      multiVotesCheckbox.checked = false;
+      multiVotesCheckbox.dispatchEvent(new Event('change'));
+      refreshActive();
+    } else {
+      const data = await resp.json().catch(() => ({}));
+      showStatus(`Error: ${data.detail || resp.statusText}`, 'error');
+    }
+  } catch (e) {
+    showStatus(`Network error: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Activate Question';
+  }
+}
+
+async function refreshActive() {
+  try {
+    const resp = await fetch('/api/results');
+    const data = await resp.json();
+    const panel = document.getElementById('active-panel');
+    const content = document.getElementById('active-content');
+
+    if (!data.active) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = 'block';
+
+    const contextHtml = data.context_text
+      ? `<div class="context-text">${escHtml(data.context_text)}</div>`
+      : '';
+
+    let optHtml = '';
+    (data.options || []).forEach((opt, i) => {
+      const pct = opt.vote_pct || 0;
+      optHtml += `
+        <div class="option-result">
+          <div class="option-result-header">
+            <span class="option-result-label">
+              <span style="display:inline-block;width:22px;height:22px;border-radius:50%;vertical-align:middle;margin-right:8px;" class="${OPTION_COLORS[i]}"></span>
+              ${escHtml(opt.option_text)}
+            </span>
+            <span class="option-result-count">${opt.vote_count} votes &nbsp;·&nbsp; ${pct}%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill ${OPTION_COLORS[i]}" style="width:${pct}%"></div>
+          </div>
+        </div>`;
+    });
+
+    const freshness = data.freshness_ms != null
+      ? `<span>Freshness <strong>${data.freshness_ms}ms</strong></span>`
+      : '';
+
+    content.innerHTML = `
+      <div class="question-header">
+        ${escHtml(data.question_text)}
+        ${contextHtml}
+      </div>
+      ${optHtml}
+      <div class="meta-row">
+        <span>Total <strong>${data.total_votes}</strong> votes</span>
+        <span>Rate <strong>${data.votes_per_sec}/s</strong></span>
+        ${freshness}
+        <span>Query <strong>${data.query_ms}ms</strong></span>
+      </div>`;
+  } catch (e) {
+    console.error('Failed to refresh active question:', e);
+  }
+}
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// Toggle switch visual
+const multiVotesCheckbox = document.getElementById('multi-votes');
+const toggleTrack = document.getElementById('toggle-track');
+const toggleThumb = document.getElementById('toggle-thumb');
+multiVotesCheckbox.addEventListener('change', () => {
+  if (multiVotesCheckbox.checked) {
+    toggleTrack.style.background = 'var(--accent)';
+    toggleThumb.style.transform = 'translateX(18px)';
+  } else {
+    toggleTrack.style.background = 'var(--border)';
+    toggleThumb.style.transform = 'translateX(0)';
+  }
+});
+// Make the whole label area clickable
+document.querySelector('.toggle-switch').addEventListener('click', () => {
+  multiVotesCheckbox.checked = !multiVotesCheckbox.checked;
+  multiVotesCheckbox.dispatchEvent(new Event('change'));
+});
+
+// Init
+addOption(); addOption(); // Start with 2 options
+refreshActive();
+setInterval(refreshActive, 3000);
+</script>
+</body>
+</html>

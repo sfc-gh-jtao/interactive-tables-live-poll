@@ -1,0 +1,13 @@
+name       = "demo-predictions-worker"
+main       = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# Workers free plan supports up to 100,000 requests/day — plenty for a demo.
+# Secrets are set via: wrangler secret put <NAME>
+# Required secrets:
+#   SNOWFLAKE_ACCOUNT      e.g. sfsenorthamerica-demo98
+#   SNOWFLAKE_USER         DEMO_SERVICE_USER
+#   SNOWFLAKE_PRIVATE_KEY  full RSA private key PEM (from rsa_key.p8)
+#   SNOWFLAKE_DATABASE     DEMO_PREDICTIONS_DB
+#   SNOWFLAKE_SCHEMA       PUBLIC
+#   SNOWFLAKE_ROLE         DEMO_SERVICE_ROLE

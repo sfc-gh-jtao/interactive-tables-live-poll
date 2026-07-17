@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Live Poll Dashboard</title>
+<style>
+  :root {
+    --bg:      #0f1117;
+    --surface: #1a1d27;
+    --border:  #2e3347;
+    --text:    #e8ecf4;
+    --muted:   #8892a4;
+    --accent:  #29b5e8;
+    --radius:  12px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+    display: grid;
+    grid-template-rows: 56px 1fr 48px;
+    grid-template-columns: 1fr 280px;
+    grid-template-areas:
+      "header  header"
+      "main    sidebar"
+      "footer  footer";
+  }
+
+  /* ---- Header ---- */
+  header {
+    grid-area: header;
+    display: flex;
+    align-items: center;
+    padding: 0 28px;
+    border-bottom: 1px solid var(--border);
+    gap: 20px;
+  }
+  .logo {
+    font-size: 0.75rem;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+  .divider-v { width: 1px; height: 20px; background: var(--border); }
+  #question-header {
+    flex: 1;
+    font-size: 1rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #question-header.empty { color: var(--muted); font-weight: 400; }
+
+  /* ---- Main: Bar Chart ---- */
+  main {
+    grid-area: main;
+    padding: 28px 24px 16px 28px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  #no-question {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+    color: var(--muted);
+  }
+  #no-question .big-icon { font-size: 3.5rem; }
+  #no-question p { font-size: 1rem; }
+
+  #chart-area { flex: 1; display: flex; flex-direction: column; gap: 0; min-height: 0; }
+
+  .bar-row {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-height: 0;
+    padding: 6px 0;
+  }
+
+  .bar-label-col {
+    width: 220px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  .bar-badge {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    font-size: 0.85rem;
+    font-weight: 800;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: #0f1117;
+  }
+  .bar-opt-text {
+    font-size: 0.9rem;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+
+  .bar-track-col {
+    flex: 1;
+    position: relative;
+    height: 38px;
+    min-height: 38px;
+  }
+  .bar-track {
+    width: 100%;
+    height: 100%;
+    background: color-mix(in srgb, var(--opt-color) 10%, var(--surface));
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--opt-color) 20%, var(--border));
+  }
+  .bar-fill {
+    height: 100%;
+    border-radius: 8px;
+    transition: width 0.5s cubic-bezier(.4,0,.2,1);
+    position: relative;
+  }
+
+  .bar-pct-col {
+    width: 64px;
+    text-align: right;
+    font-size: 1.2rem;
+    font-weight: 800;
+    flex-shrink: 0;
+  }
+  .bar-count-col {
+    width: 72px;
+    text-align: right;
+    font-size: 0.85rem;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+
+  /* Option colors */
+  .opt-0 { --opt-color: #29b5e8; }
+  .opt-1 { --opt-color: #56d483; }
+  .opt-2 { --opt-color: #e8a229; }
+  .opt-3 { --opt-color: #9b59b6; }
+  .opt-4 { --opt-color: #e85d4a; }
+  .opt-5 { --opt-color: #1abc9c; }
+
+  /* ---- Sidebar ---- */
+  aside {
+    grid-area: sidebar;
+    border-left: 1px solid var(--border);
+    padding: 20px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    overflow-y: auto;
+  }
+
+  .side-section { display: flex; flex-direction: column; gap: 8px; }
+  .side-label {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .kpi-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .kpi-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+  }
+  .kpi-val {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1.1;
+  }
+  .kpi-lbl { font-size: 0.7rem; color: var(--muted); margin-top: 3px; }
+
+  /* Freshness */
+  #freshness-val { font-size: 1.8rem; font-weight: 800; color: var(--accent); }
+  .freshness-note { font-size: 0.72rem; color: var(--muted); }
+
+  /* QR Code */
+  #qr-container {
+    background: #ffffff;
+    border-radius: 10px;
+    padding: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #qr-canvas { display: block; }
+  .qr-url {
+    font-size: 0.7rem;
+    color: var(--muted);
+    text-align: center;
+    word-break: break-all;
+    margin-top: 6px;
+  }
+
+  /* Compare button */
+  .btn-compare {
+    width: 100%;
+    padding: 11px;
+    background: none;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    color: var(--accent);
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+    transition: background 0.15s, color 0.15s;
+  }
+  .btn-compare:hover { background: var(--accent); color: var(--bg); }
+  .btn-compare:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Compare results */
+  #compare-panel { display: none; }
+  #compare-panel.visible { display: block; }
+  .compare-row { margin-bottom: 10px; }
+  .compare-wh-label { font-size: 0.75rem; font-weight: 600; margin-bottom: 4px; }
+  .compare-wh-label .badge {
+    display: inline-block;
+    font-size: 0.65rem;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-left: 6px;
+    font-weight: 700;
+  }
+  .badge-iwt { background: #1a3a4a; color: var(--accent); }
+  .badge-std { background: #2a2a1a; color: #e8a229; }
+  .compare-bar-track {
+    height: 8px;
+    background: var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 3px;
+  }
+  .compare-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+  .compare-iwt-fill { background: var(--accent); }
+  .compare-std-fill { background: #e8a229; }
+  .compare-ms {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .compare-speedup {
+    margin-top: 8px;
+    font-size: 0.8rem;
+    color: var(--accent);
+    font-weight: 700;
+    text-align: center;
+    padding: 6px;
+    background: #1a3a4a;
+    border-radius: 6px;
+  }
+
+  /* Footer */
+  footer {
+    grid-area: footer;
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 28px;
+    gap: 20px;
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
+  footer strong { color: var(--text); }
+  .pulse {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #56d483;
+    animation: pulse 1.5s ease infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.5; transform: scale(0.8); }
+  }
+
+  /* Spinner */
+  .spinner-sm {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+    margin-right: 4px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header>
+  <div class="logo">Snowflake · Live Poll</div>
+  <div class="divider-v"></div>
+  <div id="question-header" class="empty">Waiting for a question...</div>
+</header>
+
+<!-- Main: Bar chart -->
+<main>
+  <div id="no-question">
+    <div class="big-icon">📊</div>
+    <p>No active question — open <strong>/admin</strong> to create one.</p>
+  </div>
+  <div id="chart-area" style="display:none"></div>
+</main>
+
+<!-- Sidebar -->
+<aside>
+
+  <!-- KPIs -->
+  <div class="side-section">
+    <div class="side-label">Live Metrics</div>
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-val" id="kpi-total">—</div>
+        <div class="kpi-lbl">Total Votes</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-val" id="kpi-vps">—</div>
+        <div class="kpi-lbl">Votes / sec</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Freshness -->
+  <div class="side-section">
+    <div class="side-label">Pipeline Latency</div>
+    <div class="kpi-card" style="text-align:center">
+      <div id="freshness-val">—</div>
+      <div class="freshness-note" id="freshness-note">cast a vote to measure e2e latency</div>
+    </div>
+  </div>
+
+  <!-- QR code -->
+  <div class="side-section">
+    <div class="side-label">Audience — Scan to Vote</div>
+    <div id="qr-container">
+      <div id="qr-canvas"></div>
+    </div>
+    <div class="qr-url" id="qr-url"></div>
+  </div>
+
+  <!-- Speed comparison -->
+  <div class="side-section">
+    <div class="side-label">Warehouse Speed Comparison</div>
+    <button class="btn-compare" id="btn-compare" onclick="runComparison()">
+      Compare Interactive vs Standard
+    </button>
+    <div id="compare-panel">
+      <div class="compare-row">
+        <div class="compare-wh-label">Interactive Warehouse <span class="badge badge-iwt">IWT</span></div>
+        <div class="compare-bar-track">
+          <div class="compare-bar-fill compare-iwt-fill" id="cmp-iwt-bar" style="width:0%"></div>
+        </div>
+        <div class="compare-ms" id="cmp-iwt-ms">—</div>
+      </div>
+      <div class="compare-row">
+        <div class="compare-wh-label">Standard Warehouse <span class="badge badge-std">STD</span></div>
+        <div class="compare-bar-track">
+          <div class="compare-bar-fill compare-std-fill" id="cmp-std-bar" style="width:0%"></div>
+        </div>
+        <div class="compare-ms" id="cmp-std-ms">—</div>
+      </div>
+      <div class="compare-speedup" id="cmp-speedup" style="display:none"></div>
+    </div>
+  </div>
+
+</aside>
+
+<!-- Footer -->
+<footer>
+  <div class="pulse" id="pulse-dot"></div>
+  <span>Query <strong id="footer-query-ms">—</strong> ms on Interactive Warehouse</span>
+  <span style="margin-left:auto">Auto-refreshes every 1.5s</span>
+</footer>
+
+<!-- Vendored QR code library (no CDN) -->
+<script src="/static/qrcode.min.js"></script>
+
+<script>
+// ---------------------------------------------------------------------------
+// QR code
+// ---------------------------------------------------------------------------
+// Vote URL — uses the public Cloudflare Worker URL if configured,
+// otherwise falls back to this SPCS origin (for authenticated demos).
+let voteUrl = window.location.origin + '/vote';
+fetch('/api/config')
+  .then(r => r.json())
+  .then(d => {
+    if (d.public_vote_url) {
+      voteUrl = d.public_vote_url;
+      document.getElementById('qr-url').textContent = voteUrl;
+      renderQR();
+    }
+  })
+  .catch(() => {});  // silently use the default
+
+document.getElementById('qr-url').textContent = voteUrl;
+
+function renderQR() {
+  try {
+    const el = document.getElementById('qr-canvas');
+    el.innerHTML = '';
+    new QRCode(el, {
+      text:         voteUrl,
+      width:        200,
+      height:       200,
+      colorDark:    '#000000',
+      colorLight:   '#ffffff',
+      correctLevel: QRCode.CorrectLevel.H,
+    });
+  } catch (e) {
+    document.getElementById('qr-container').innerHTML =
+      `<div style="color:#8892a4;font-size:0.8rem;text-align:center;padding:8px">QR: ${voteUrl}</div>`;
+  }
+}
+renderQR();
+
+// ---------------------------------------------------------------------------
+// Option colors (CSS custom property values)
+// ---------------------------------------------------------------------------
+const OPT_COLORS = ['#29b5e8','#56d483','#e8a229','#9b59b6','#e85d4a','#1abc9c'];
+const OPT_CLASSES = ['opt-0','opt-1','opt-2','opt-3','opt-4','opt-5'];
+
+// ---------------------------------------------------------------------------
+// Render chart
+// ---------------------------------------------------------------------------
+function renderChart(data) {
+  const noQ      = document.getElementById('no-question');
+  const chartArea= document.getElementById('chart-area');
+  const qHeader  = document.getElementById('question-header');
+
+  if (!data.active) {
+    noQ.style.display        = 'flex';
+    chartArea.style.display  = 'none';
+    qHeader.textContent      = 'Waiting for a question...';
+    qHeader.classList.add('empty');
+    document.getElementById('kpi-total').textContent     = '—';
+    document.getElementById('kpi-vps').textContent       = '—';
+    document.getElementById('freshness-val').textContent = '—';
+    document.getElementById('footer-query-ms').textContent = '—';
+    return;
+  }
+
+  noQ.style.display       = 'none';
+  chartArea.style.display = 'flex';
+  qHeader.textContent     = data.question_text;
+  qHeader.classList.remove('empty');
+
+  // KPIs
+  document.getElementById('kpi-total').textContent     = data.total_votes;
+  document.getElementById('kpi-vps').textContent       = data.votes_per_sec;
+  // Show pipeline latency only when a vote just landed (< 10s old = meaningful e2e measurement)
+  const FRESHNESS_THRESHOLD_MS = 10000;
+  const fms = data.freshness_ms;
+  const freshnessEl   = document.getElementById('freshness-val');
+  const freshnessNote = document.getElementById('freshness-note');
+  if (fms != null && fms < FRESHNESS_THRESHOLD_MS) {
+    freshnessEl.textContent   = fms + 'ms';
+    freshnessNote.textContent = 'vote-to-dashboard, end-to-end';
+  } else {
+    freshnessEl.textContent   = '—';
+    freshnessNote.textContent = 'cast a vote to measure e2e latency';
+  }
+  document.getElementById('footer-query-ms').textContent = data.query_ms ?? '—';
+
+  const options = (data.options || []).sort((a,b) => a.display_order - b.display_order);
+
+  // Rebuild rows only when option count changes (avoids flash)
+  const existing = chartArea.querySelectorAll('.bar-row');
+  if (existing.length !== options.length) {
+    chartArea.innerHTML = '';
+    options.forEach((_, i) => {
+      const row = document.createElement('div');
+      row.className = `bar-row ${OPT_CLASSES[i]}`;
+      row.id = `bar-row-${i}`;
+      row.style.setProperty('--opt-color', OPT_COLORS[i]);
+      row.innerHTML = `
+        <div class="bar-label-col">
+          <div class="bar-badge" style="background:${OPT_COLORS[i]}">${String.fromCharCode(65+i)}</div>
+          <div class="bar-opt-text" id="bar-label-${i}"></div>
+        </div>
+        <div class="bar-track-col">
+          <div class="bar-track">
+            <div class="bar-fill" id="bar-fill-${i}" style="background:${OPT_COLORS[i]};width:0%"></div>
+          </div>
+        </div>
+        <div class="bar-pct-col" id="bar-pct-${i}" style="color:${OPT_COLORS[i]}">0%</div>
+        <div class="bar-count-col" id="bar-count-${i}">0 votes</div>`;
+      chartArea.appendChild(row);
+    });
+  }
+
+  // Update values
+  options.forEach((opt, i) => {
+    const labelEl = document.getElementById(`bar-label-${i}`);
+    const fillEl  = document.getElementById(`bar-fill-${i}`);
+    const pctEl   = document.getElementById(`bar-pct-${i}`);
+    const countEl = document.getElementById(`bar-count-${i}`);
+    if (labelEl)  labelEl.textContent = opt.option_text;
+    if (fillEl)   fillEl.style.width  = opt.vote_pct + '%';
+    if (pctEl)    pctEl.textContent   = opt.vote_pct + '%';
+    if (countEl)  countEl.textContent = opt.vote_count + ' vote' + (opt.vote_count !== 1 ? 's' : '');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Poll for results
+// ---------------------------------------------------------------------------
+async function refresh() {
+  try {
+    const resp = await fetch('/api/results');
+    const data = await resp.json();
+    renderChart(data);
+  } catch (e) {
+    console.error('refresh error:', e);
+  }
+}
+
+refresh();
+setInterval(refresh, 1500);
+
+// ---------------------------------------------------------------------------
+// Warehouse speed comparison
+// ---------------------------------------------------------------------------
+async function runComparison() {
+  const btn = document.getElementById('btn-compare');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-sm"></span> Running...';
+
+  try {
+    const resp = await fetch('/api/compare');
+    const data = await resp.json();
+
+    const iwtMs = data.interactive?.elapsed_ms;
+    const stdMs = data.standard?.elapsed_ms;
+
+    const panel = document.getElementById('compare-panel');
+    panel.classList.add('visible');
+
+    if (iwtMs != null && stdMs != null) {
+      const maxMs = Math.max(iwtMs, stdMs, 1);
+      document.getElementById('cmp-iwt-bar').style.width = (iwtMs / maxMs * 100).toFixed(1) + '%';
+      document.getElementById('cmp-std-bar').style.width = (stdMs / maxMs * 100).toFixed(1) + '%';
+      document.getElementById('cmp-iwt-ms').textContent  = iwtMs + ' ms';
+      document.getElementById('cmp-std-ms').textContent  = stdMs + ' ms';
+
+      const speedup = (stdMs / Math.max(iwtMs, 1)).toFixed(1);
+      const su = document.getElementById('cmp-speedup');
+      su.style.display = 'block';
+      su.textContent   = `Interactive is ${speedup}× faster`;
+    } else {
+      const err = data.errors ? JSON.stringify(data.errors) : 'Unknown error';
+      document.getElementById('cmp-speedup').style.display = 'block';
+      document.getElementById('cmp-speedup').textContent   = 'Error: ' + err;
+    }
+
+  } catch (e) {
+    console.error('compare error:', e);
+  } finally {
+    btn.disabled  = false;
+    btn.textContent = 'Run Comparison Again';
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+spec:
+  containers:
+    - name: predictions-api
+      image: /demo_predictions_db/public/demo_img_repo/predictions-api:latest
+      env:
+        SNOWFLAKE_ACCOUNT: "sfsenorthamerica-demo98"
+        SNOWFLAKE_DATABASE: "DEMO_PREDICTIONS_DB"
+        SNOWFLAKE_SCHEMA: "PUBLIC"
+        SNOWFLAKE_ROLE: "ACCOUNTADMIN"
+        ADMIN_TOKEN: "Snowflake26!"
+        # Set to your Cloudflare Worker URL after wrangler deploy
+        # e.g. PUBLIC_VOTE_URL: "https://demo-predictions-worker.<subdomain>.workers.dev"
+        PUBLIC_VOTE_URL: ""
+      resources:
+        requests:
+          cpu: "0.5"
+          memory: 512M
+        limits:
+          cpu: "1"
+          memory: 1G
+  endpoints:
+    - name: api
+      port: 8080
+      public: true
+  networkPolicyConfig:
+    allowInternetEgress: true
+capabilities:
+  securityContext:
+    enableCustomCredentials: true   # mounts SPCS OAuth token at /snowflake/session/token
