@@ -5,18 +5,79 @@ A live audience polling demo that streams votes from phones into Snowflake Inter
 ## Architecture
 
 ```
-Phone (QR scan)
-  → Cloudflare Worker (public HTTPS, no Snowflake auth)
-      → Snowpipe Streaming REST API
-          → fact_predictions  (Interactive Table — votes)
-          → dim_voters        (Interactive Table — geo + device metadata)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         AUDIENCE (phones / laptops)                         │
+│                                                                             │
+│   QR scan → https://demo-predictions-worker.<subdomain>.workers.dev        │
+└─────────────────────────────┬───────────────────────────────────────────────┘
+                              │  GET /api/question  (polls every 4s)
+                              │  POST /api/vote
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        CLOUDFLARE WORKER  (public edge)                     │
+│                                                                             │
+│  • Serves vote.html (email gate, option buttons, voted confirmation)        │
+│  • JWT-signs requests to Snowflake SQL API & Snowpipe Streaming             │
+│  • Attaches Cloudflare geo metadata (country, region, city, lat/lng)       │
+│  • Rate-limits: 15 req/min per IP                                           │
+└──────────┬───────────────────────────────────────┬──────────────────────────┘
+           │  Snowpipe Streaming REST API           │  SQL API (DEMO_STD_WH)
+           │  POST /api/v1/streaming/channels/      │  GET active question
+           ▼                                        ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          SNOWFLAKE  (DEMO_PREDICTIONS_DB)                    │
+│                                                                              │
+│   Interactive Tables ──────────────────────────── DEMO_IWT_WH               │
+│   ┌──────────────────────┐  ┌────────────────────┐  XSmall Interactive      │
+│   │  fact_predictions    │  │  dim_voters         │  Warehouse               │
+│   │  (votes stream)      │  │  (geo + device,     │  0.6 credits/hr          │
+│   │  predicted_at        │  │   first vote/sess)  │  350 GB cache            │
+│   │  server_received_at  │  │  voter_email        │  sub-10ms queries        │
+│   └──────────────────────┘  └────────────────────┘                          │
+│   ┌──────────────────────┐  ┌────────────────────┐                          │
+│   │  dim_questions       │  │  dim_answer_options │  ◄── SPCS writes         │
+│   │  (INSERT OVERWRITE)  │  │  (INSERT OVERWRITE) │      via admin API       │
+│   └──────────────────────┘  └────────────────────┘                          │
+│                                                                              │
+│   DEMO_STD_WH  (XSmall Standard, fallback + Worker SQL API)                 │
+└──────────────────────────────────────┬───────────────────────────────────────┘
+                                       │  psycopg2  (DEMO_IWT_WH / DEMO_STD_WH)
+                                       │  poll every 1-2s
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    SPCS  (Snowpark Container Services)                      │
+│                    FastAPI  ·  CPU_X64_XS  ·  0.06 credits/hr              │
+│                                                                             │
+│   GET  /api/results   → vote counts, pipeline latency (freshness_ms)       │
+│   GET  /api/voters    → geo points, device breakdown, country counts        │
+│   GET  /api/compare   → IWT vs STD side-by-side query timing                │
+│   POST /api/question  → INSERT OVERWRITE dim_questions + dim_answer_options │
+│   POST /api/reset     → clear session start timestamp                       │
+│   GET  /dashboard     → presenter screen (bar chart, map, comparison)       │
+│   GET  /admin         → question setup (SSO-gated)                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              ▲
+                              │  HTTPS  (Snowflake SSO)
+┌─────────────────────────────┴───────────────────────────────────────────────┐
+│                       PRESENTER LAPTOP / PROJECTOR                          │
+│                                                                             │
+│  /dashboard  — bar chart + pipeline latency card + audience map             │
+│  /admin      — create question, toggles, reset session                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-Presenter laptop
-  → /dashboard  — live bar chart + pipeline latency + warehouse comparison + audience map
-  → /admin      — create questions, set allow-multiple-votes toggle
+**Vote path latency breakdown:**
 
-Dashboard polls SPCS (/api/results, /api/voters) every 1-2s
-SPCS queries DEMO_IWT_WH (sub-second Interactive Warehouse)
+```
+Phone button press
+      │  ~50–150ms (network to Cloudflare edge)
+      ▼
+Cloudflare Worker  ──► Snowpipe Streaming  ──► fact_predictions committed
+      │                 ~100–300ms                    │
+      │                                               │ server_received_at stamped here
+      ▼                                               ▼
+Dashboard poll (1.5s interval)  ──►  DEMO_IWT_WH query  ──►  freshness_ms displayed
+                                      ~5–15ms
 ```
 
 **Four Interactive Tables, all in `DEMO_IWT_WH`:**
@@ -155,6 +216,7 @@ SELECT SYSTEM$GET_SERVICE_STATUS('DEMO_PREDICTIONS_DB.PUBLIC.DEMO_SERVICE');
 
 ## Demo Flow
 
+> **Before the event**: run `sql/03_resume.sql` ~5–10 minutes early to resume all services and warm the IWT cache.
 1. Open `/dashboard` on your projector screen
 2. Open `/admin` in a separate tab — no password needed (gated by Snowflake SSO)
 3. Create a question with 2–6 options; optionally enable:
@@ -227,6 +289,8 @@ ALTER WAREHOUSE DEMO_IWT_WH RESUME;
 ALTER WAREHOUSE DEMO_IWT_WH SUSPEND;
 ```
 
+For a full pre-event checklist, run `sql/03_resume.sql` — it resumes the warehouse, compute pool, and SPCS service, then runs a smoke test query to confirm the dashboard query path is working.
+
 ## Cost Estimate
 
 Credit rates from [Snowflake Service Consumption Table](https://www.snowflake.com/legal-files/CreditConsumptionTable.pdf) (effective July 14, 2026):
@@ -257,10 +321,11 @@ Credit rates from [Snowflake Service Consumption Table](https://www.snowflake.co
 
 At $3/credit (standard platform rate): **~$60–84 / 24 hours**
 
-For a typical 1–2 hour demo session:
-- Suspend `DEMO_IWT_WH` immediately after: costs ~1–2 credits for the IWT (1hr minimum per resume)
-- SPCS pool: 0.06–0.12 credits
-- Total for a single session: **~2–5 credits (~$6–15)**
+For a typical 8-hour hackathon or booth day:
+- `DEMO_IWT_WH` at 0.6 credits/hr × 8 hours = **4.8 credits**
+- `DEMO_CPU_POOL` at 0.06 credits/hr × 8 hours = **0.48 credits**
+- `DEMO_STD_WH` active ~6 hours (steady voter traffic): **~6 credits**
+- Total for an 8-hour event: **~11–12 credits (~$33–36 at $3/credit)**
 
 > The 24-hour running cost applies only if you leave everything up all day. Suspending the IWT overnight reduces the IWT cost to 0 between sessions — the dominant saving.
 
@@ -283,7 +348,8 @@ demo-predictions/
 │   └── src/index.js       Worker: vote page, Snowpipe Streaming, geo metadata
 ├── sql/
 │   ├── 01_setup.sql       Full Snowflake provisioning
-│   └── 02_cleanup.sql     Full teardown
+│   ├── 02_cleanup.sql     Full teardown
+│   └── 03_resume.sql      Pre-event resume: warehouses, compute pool, SPCS service + smoke test
 ├── Dockerfile
 ├── snowflake.yml          SPCS service spec
 ├── requirements.txt
