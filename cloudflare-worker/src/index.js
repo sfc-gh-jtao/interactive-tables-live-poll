@@ -105,6 +105,25 @@ async function generateSnowflakeJWT(env) {
 let _cachedIngestHost = null;
 let _cachedAllowMultipleVotes = false; // mirrors current question setting
 
+// Tracks sessions that have already written voter metadata (first-vote only)
+const _voterWritten = new Set();
+
+/** Parse User-Agent string into device_type, os, browser */
+function parseUserAgent(ua) {
+  const device_type = /iPad|Tablet/i.test(ua) ? 'tablet'
+                    : /Mobi|Android|iPhone/i.test(ua) ? 'mobile' : 'desktop';
+  const os = /iPhone|iPad/i.test(ua) ? 'iOS'
+           : /Android/i.test(ua) ? 'Android'
+           : /Windows/i.test(ua) ? 'Windows'
+           : /Mac OS/i.test(ua) ? 'macOS'
+           : /Linux/i.test(ua) ? 'Linux' : 'Unknown';
+  const browser = /Edg\//i.test(ua) ? 'Edge'
+                : /Chrome/i.test(ua) ? 'Chrome'
+                : /Firefox/i.test(ua) ? 'Firefox'
+                : /Safari/i.test(ua) ? 'Safari' : 'Unknown';
+  return { device_type, os, browser };
+}
+
 async function getIngestHostname(jwt, account) {
   if (_cachedIngestHost) return _cachedIngestHost;
 
@@ -173,6 +192,45 @@ async function streamVote(jwt, ingestHost, env, row) {
   return true;
 }
 
+/** Write voter metadata row to dim_voters (first vote per session only) */
+async function streamVoterMetadata(jwt, ingestHost, env, row) {
+  const db      = env.SNOWFLAKE_DATABASE;
+  const schema  = env.SNOWFLAKE_SCHEMA;
+  const pipe    = 'DIM_VOTERS-STREAMING';
+  const channel = `CF_VOTER_${Date.now()}_${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+
+  const authHeaders = {
+    Authorization: `Bearer ${jwt}`,
+    'X-Snowflake-Authorization-Token-Type': 'KEYPAIR_JWT',
+    'User-Agent': 'demo-predictions-worker/1.0',
+    'Accept': 'application/json',
+  };
+
+  const openUrl = `https://${ingestHost}/v2/streaming/databases/${db}/schemas/${schema}/pipes/${pipe}/channels/${channel}`;
+  const openRes = await fetch(openUrl, {
+    method: 'PUT',
+    headers: { ...authHeaders, 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  if (!openRes.ok) {
+    const errText = await openRes.text();
+    console.warn(`streamVoterMetadata open_channel failed ${openRes.status}:`, errText);
+    return; // Non-fatal
+  }
+  const { next_continuation_token } = await openRes.json();
+
+  const appendUrl = `https://${ingestHost}/v2/streaming/data/databases/${db}/schemas/${schema}/pipes/${pipe}/channels/${channel}/rows?continuationToken=${encodeURIComponent(next_continuation_token)}`;
+  const appendRes = await fetch(appendUrl, {
+    method: 'POST',
+    headers: { ...authHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify(row) + '\n',
+  });
+  if (!appendRes.ok) {
+    const errText = await appendRes.text();
+    console.warn(`streamVoterMetadata append_rows failed ${appendRes.status}:`, errText);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Snowflake SQL REST API — query active question
 // ---------------------------------------------------------------------------
@@ -182,6 +240,7 @@ async function getActiveQuestion(jwt, env) {
 
   const sql = `
     SELECT q.question_id, q.question_text, q.context_text, q.allow_multiple_votes,
+           q.require_email,
            a.option_id, a.option_text, a.display_order
     FROM ${env.SNOWFLAKE_DATABASE}.${env.SNOWFLAKE_SCHEMA}.dim_questions q
     JOIN ${env.SNOWFLAKE_DATABASE}.${env.SNOWFLAKE_SCHEMA}.dim_answer_options a
@@ -213,22 +272,24 @@ async function getActiveQuestion(jwt, env) {
   const data = await res.json();
   if (!data.data || data.data.length === 0) return null;
 
-  // Rows: [question_id, question_text, context_text, allow_multiple_votes, option_id, option_text, display_order]
+  // Rows: [question_id, question_text, context_text, allow_multiple_votes, require_email, option_id, option_text, display_order]
   const first = data.data[0];
-  const allowMultiple = first[3] === 'true' || first[3] === true;
+  const allowMultiple  = String(first[3]).toLowerCase() === 'true';
+  const requireEmail   = String(first[4]).toLowerCase() === 'true';
   _cachedAllowMultipleVotes = allowMultiple;
   const question = {
     question_id:          first[0],
     question_text:        first[1],
     context_text:         first[2],
     allow_multiple_votes: allowMultiple,
+    require_email:        requireEmail,
     options: [],
   };
   for (const row of data.data) {
     question.options.push({
-      option_id:     row[4],
-      option_text:   row[5],
-      display_order: parseInt(row[6], 10),
+      option_id:     row[5],
+      option_text:   row[6],
+      display_order: parseInt(row[7], 10),
     });
   }
   return question;
@@ -290,6 +351,14 @@ const VOTE_HTML = `<!DOCTYPE html>
   /* Vote toast (multi-vote mode) */
   #vote-toast { position:fixed;top:20px;left:50%;transform:translateX(-50%) translateY(-80px);background:#29b5e8;color:#0f1117;padding:10px 22px;border-radius:30px;font-weight:700;font-size:.9rem;letter-spacing:.04em;transition:transform .25s cubic-bezier(.34,1.56,.64,1),opacity .25s;opacity:0;pointer-events:none;white-space:nowrap;z-index:100; }
   #vote-toast.show { transform:translateX(-50%) translateY(0);opacity:1; }
+  /* Email capture state */
+  #state-email { justify-content:flex-start; }
+  .email-prompt { font-size:1.1rem;font-weight:700;line-height:1.45;margin-bottom:6px; }
+  .email-sub { font-size:.9rem;color:var(--muted);margin-bottom:24px;line-height:1.5; }
+  .email-input { width:100%;background:var(--surface);border:2px solid var(--border);border-radius:var(--r);color:var(--text);font-size:1rem;padding:14px 16px;outline:none;transition:border-color .15s;margin-bottom:12px; }
+  .email-input:focus { border-color:#29b5e8; }
+  .email-input.invalid { border-color:#e85d4a; }
+  .email-note { font-size:.75rem;color:var(--muted);text-align:center;margin-top:16px; }
 </style>
 </head>
 <body>
@@ -298,6 +367,13 @@ const VOTE_HTML = `<!DOCTYPE html>
 <div class="main">
   <div class="state active" id="state-loading"><div class="spinner"></div></div>
   <div class="state" id="state-empty"><p>No active question right now.<br>Check back in a moment.</p></div>
+  <div class="state" id="state-email">
+    <div class="email-prompt" id="email-q-text"></div>
+    <div class="email-sub">Enter your email to participate</div>
+    <input class="email-input" type="email" id="email-input" placeholder="your@email.com" autocomplete="email" inputmode="email">
+    <button class="option-btn" id="btn-email-submit" onclick="submitEmail()" style="justify-content:center;font-size:1rem;">→&nbsp; Continue to Vote</button>
+    <p class="email-note">Your email is collected for event follow-up only.</p>
+  </div>
   <div class="state" id="state-vote">
     <div class="question-text" id="q-text"></div>
     <div class="question-context" id="q-context"></div>
@@ -309,7 +385,7 @@ const VOTE_HTML = `<!DOCTYPE html>
   </div>
 </div>
 <script>
-const SESSION_KEY='demo_poll_session';const VOTE_KEY='demo_poll_vote';
+const SESSION_KEY='demo_poll_session';const VOTE_KEY='demo_poll_vote';const EMAIL_KEY='demo_poll_email';
 let sessionId=localStorage.getItem(SESSION_KEY);
 if(!sessionId){sessionId=crypto.randomUUID();localStorage.setItem(SESSION_KEY,sessionId);}
 let currentQuestionId=null,myVoteOptionId=null,pollInterval=null,currentQuestion=null;
@@ -324,11 +400,29 @@ function showToast(msg){
   clearTimeout(toastTimer);
   toastTimer=setTimeout(()=>t.classList.remove('show'),1800);
 }
+function submitEmail(){
+  const input=document.getElementById('email-input');
+  const email=input.value.trim();
+  if(!email||!/^[^@]+@[^@]+\.[^@]+$/.test(email)){input.classList.add('invalid');return;}
+  input.classList.remove('invalid');
+  localStorage.setItem(EMAIL_KEY+':'+currentQuestionId, email);
+  loadQuestion();
+}
 async function loadQuestion(){
   try{
     const resp=await fetch('/api/question');
     const data=await resp.json();
     if(!data.active){showState('state-empty');clearInterval(pollInterval);pollInterval=setInterval(loadQuestion,4000);return;}
+    // Email gate: show email capture if required and not yet provided
+    if(data.require_email){
+      const savedEmail=localStorage.getItem(EMAIL_KEY+':'+data.question_id);
+      if(!savedEmail){
+        currentQuestionId=data.question_id;currentQuestion=data;
+        document.getElementById('email-q-text').textContent=data.question_text;
+        showState('state-email');
+        clearInterval(pollInterval);pollInterval=setInterval(loadQuestion,4000);return;
+      }
+    }
     // If already voted for this question and single-vote mode, show voted state
     const savedVote=JSON.parse(localStorage.getItem(VOTE_KEY)||'null');
     if(!data.allow_multiple_votes&&savedVote&&savedVote.question_id===data.question_id){
@@ -355,7 +449,11 @@ async function loadQuestion(){
 async function castVote(optionId){
   document.querySelectorAll('.option-btn').forEach(b=>{b.disabled=true;if(b.dataset.optionId===optionId)b.classList.add('selected');});
   try{
-    const resp=await fetch('/api/vote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question_id:currentQuestionId,option_id:optionId,session_id:sessionId,platform:isMobile()})});
+    const votedAtMs=Date.now();
+    const voterEmail=currentQuestion&&currentQuestion.require_email
+      ?(localStorage.getItem(EMAIL_KEY+':'+currentQuestionId)||null)
+      :null;
+    const resp=await fetch('/api/vote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question_id:currentQuestionId,option_id:optionId,session_id:sessionId,platform:isMobile(),voted_at_ms:votedAtMs,voter_email:voterEmail})});
     if(resp.ok||resp.status===409){
       if(currentQuestion&&currentQuestion.allow_multiple_votes){
         // Multi-vote mode: flash toast and stay on voting screen
@@ -463,7 +561,7 @@ export default {
         return Response.json({ error: 'Invalid JSON' }, { status: 400, headers: corsHeaders });
       }
 
-      const { question_id, option_id, session_id, platform } = body;
+      const { question_id, option_id, session_id, platform, voted_at_ms, voter_email } = body;
       if (!question_id || !option_id || !session_id) {
         return Response.json({ error: 'Missing fields' }, { status: 400, headers: corsHeaders });
       }
@@ -479,16 +577,46 @@ export default {
         const ingestHost = await getIngestHostname(jwt, env.SNOWFLAKE_ACCOUNT);
 
         const row = {
-          prediction_id: crypto.randomUUID(),
+          prediction_id:      crypto.randomUUID(),
           question_id,
           option_id,
-          predicted_at: new Date().toISOString().replace('T', ' ').replace('Z', ''),
+          predicted_at:       new Date(voted_at_ms || Date.now()).toISOString().replace('T', ' ').replace('Z', ''),
+          server_received_at: new Date().toISOString().replace('T', ' ').replace('Z', ''),
           session_id,
           platform: platform || 'unknown',
         };
 
         await streamVote(jwt, ingestHost, env, row);
         if (!_cachedAllowMultipleVotes) _voted.add(key);
+
+        // Stream voter metadata once per session (best-effort, non-fatal)
+        const voterKey = `${session_id}:${question_id}`;
+        if (!_voterWritten.has(voterKey)) {
+          try {
+            const cf = request.cf || {};
+            const ua = request.headers.get('User-Agent') || '';
+            const lang = (request.headers.get('Accept-Language') || '').split(',')[0] || null;
+            const { device_type, os, browser } = parseUserAgent(ua);
+            const voterRow = {
+              session_id, question_id,
+              voter_email: body.voter_email || null,
+              country:     cf.country     || null,
+              region:      cf.region      || null,
+              city:        cf.city        || null,
+              latitude:    cf.latitude    ? parseFloat(cf.latitude)  : null,
+              longitude:   cf.longitude   ? parseFloat(cf.longitude) : null,
+              timezone:    cf.timezone    || null,
+              device_type, os, browser,
+              language:    lang,
+              voted_at:    new Date().toISOString().replace('T', ' ').replace('Z', ''),
+            };
+            await streamVoterMetadata(jwt, ingestHost, env, voterRow);
+            _voterWritten.add(voterKey);
+          } catch (e) {
+            console.warn('voter metadata write failed (non-fatal):', e.message);
+          }
+        }
+
         return Response.json({ ok: true, allow_multiple_votes: _cachedAllowMultipleVotes }, { headers: corsHeaders });
       } catch (err) {
         console.error('POST /api/vote error:', err.message);

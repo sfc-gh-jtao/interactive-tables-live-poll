@@ -45,6 +45,7 @@ CREATE INTERACTIVE TABLE IF NOT EXISTS dim_questions (
     category             VARCHAR(64),
     is_active            BOOLEAN       DEFAULT FALSE,
     allow_multiple_votes BOOLEAN       DEFAULT FALSE,
+    require_email        BOOLEAN       DEFAULT FALSE,
     created_at           TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 ) CLUSTER BY (is_active, question_id);
 
@@ -57,18 +58,38 @@ CREATE INTERACTIVE TABLE IF NOT EXISTS dim_answer_options (
 );
 
 -- Streaming target: written to directly via Snowpipe Streaming SDK (~500ms latency)
--- CLUSTER BY (predicted_at, question_id) enables the interactive warehouse to skip
--- irrelevant micro-partitions on the time-range WHERE clause in dashboard queries.
--- No TARGET_LAG or WAREHOUSE parameter — Snowpipe Streaming bypasses refresh entirely.
 CREATE INTERACTIVE TABLE IF NOT EXISTS fact_predictions (
     prediction_id VARCHAR(36)   NOT NULL,
     question_id   VARCHAR(36)   NOT NULL,
     option_id     VARCHAR(36)   NOT NULL,
-    predicted_at  TIMESTAMP_NTZ NOT NULL,
-    session_id    VARCHAR(36)   NOT NULL,
-    platform      VARCHAR(32)
+    predicted_at       TIMESTAMP_NTZ NOT NULL,  -- client button-press time (browser clock)
+    server_received_at TIMESTAMP_NTZ,           -- Worker server clock when POST was handled
+    session_id         VARCHAR(36)   NOT NULL,
+    platform           VARCHAR(32)
 )
 CLUSTER BY (predicted_at, question_id);
+
+-- Voter metadata: geo (from Cloudflare) + device (from UA). One row per session per question.
+-- Written via Snowpipe Streaming only on the first vote from each session.
+CREATE INTERACTIVE TABLE IF NOT EXISTS dim_voters (
+    session_id    VARCHAR(36)   NOT NULL,   -- FK → fact_predictions.session_id
+    question_id   VARCHAR(36)   NOT NULL,
+    voter_email   VARCHAR(255),              -- populated when require_email is enabled
+    -- Geo (Cloudflare edge — zero user friction)
+    country       VARCHAR(2),               -- ISO 2-letter: 'US', 'GB'
+    region        VARCHAR(100),             -- 'California', 'Bavaria'
+    city          VARCHAR(100),             -- 'San Francisco'
+    latitude      FLOAT,
+    longitude     FLOAT,
+    timezone      VARCHAR(64),              -- 'America/Los_Angeles'
+    -- Device (UA parsing + Accept-Language header)
+    device_type   VARCHAR(20),              -- 'mobile' | 'tablet' | 'desktop'
+    os            VARCHAR(50),              -- 'iOS' | 'Android' | 'Windows' | 'macOS'
+    browser       VARCHAR(50),              -- 'Chrome' | 'Safari' | 'Firefox' | 'Edge'
+    language      VARCHAR(20),              -- 'en-US', 'fr-FR'
+    voted_at      TIMESTAMP_NTZ
+)
+CLUSTER BY (question_id, country);
 
 -- ---------------------------------------------------------------------------
 -- 4. Interactive Warehouse — associate all three tables at creation time
@@ -80,7 +101,8 @@ CREATE INTERACTIVE WAREHOUSE IF NOT EXISTS DEMO_IWT_WH
     TABLES (
         DEMO_PREDICTIONS_DB.PUBLIC.dim_questions,
         DEMO_PREDICTIONS_DB.PUBLIC.dim_answer_options,
-        DEMO_PREDICTIONS_DB.PUBLIC.fact_predictions
+        DEMO_PREDICTIONS_DB.PUBLIC.fact_predictions,
+        DEMO_PREDICTIONS_DB.PUBLIC.dim_voters
     )
     WAREHOUSE_SIZE = 'XSMALL'
     COMMENT        = 'Interactive Warehouse for the live poll demo';
@@ -129,6 +151,7 @@ GRANT USAGE ON WAREHOUSE DEMO_STD_WH TO ROLE DEMO_SERVICE_ROLE;
 GRANT SELECT, INSERT ON TABLE DEMO_PREDICTIONS_DB.PUBLIC.dim_questions       TO ROLE DEMO_SERVICE_ROLE;
 GRANT SELECT, INSERT ON TABLE DEMO_PREDICTIONS_DB.PUBLIC.dim_answer_options  TO ROLE DEMO_SERVICE_ROLE;
 GRANT SELECT, INSERT ON TABLE DEMO_PREDICTIONS_DB.PUBLIC.fact_predictions    TO ROLE DEMO_SERVICE_ROLE;
+GRANT SELECT, INSERT ON TABLE DEMO_PREDICTIONS_DB.PUBLIC.dim_voters          TO ROLE DEMO_SERVICE_ROLE;
 
 -- Grant CREATE INTERACTIVE TABLE (needed for INSERT OVERWRITE on dim tables)
 GRANT CREATE TABLE ON SCHEMA DEMO_PREDICTIONS_DB.PUBLIC TO ROLE DEMO_SERVICE_ROLE;
@@ -224,3 +247,4 @@ SHOW IMAGE REPOSITORIES IN SCHEMA DEMO_PREDICTIONS_DB.PUBLIC;
 SHOW COMPUTE POOLS LIKE 'DEMO_CPU_POOL';
 
 SELECT 'Setup complete. Next: build + push Docker image, then CREATE SERVICE.' AS status;
+ca

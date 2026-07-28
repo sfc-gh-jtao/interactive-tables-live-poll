@@ -1,157 +1,267 @@
 # Interactive Tables Live Poll Demo
 
-A self-contained demo that streams audience votes from phones directly into Snowflake Interactive Tables via Snowpipe Streaming, with sub-second dashboard updates and a live warehouse speed comparison.
+A live audience polling demo that streams votes from phones into Snowflake Interactive Tables via Snowpipe Streaming, with sub-second dashboard updates, a warehouse speed comparison, and a real-time audience geo/device map.
 
 ## Architecture
 
 ```
-Phone (/vote)  →  SPCS container (public HTTPS)  →  Snowpipe Streaming  →  fact_predictions (Interactive Table)
-                        ↓ also serves
-Laptop (/dashboard)                             →  3-table JOIN on DEMO_IWT_WH  (sub-second)
-Laptop (/admin)   →  INSERT OVERWRITE           →  dim_questions, dim_answer_options (static Interactive Tables)
+Phone (QR scan)
+  → Cloudflare Worker (public HTTPS, no Snowflake auth)
+      → Snowpipe Streaming REST API
+          → fact_predictions  (Interactive Table — votes)
+          → dim_voters        (Interactive Table — geo + device metadata)
+
+Presenter laptop
+  → /dashboard  — live bar chart + pipeline latency + warehouse comparison + audience map
+  → /admin      — create questions, set allow-multiple-votes toggle
+
+Dashboard polls SPCS (/api/results, /api/voters) every 1-2s
+SPCS queries DEMO_IWT_WH (sub-second Interactive Warehouse)
 ```
 
-**Three interactive tables, all in `DEMO_IWT_WH`:**
-- `dim_questions` — static, holds the active question
-- `dim_answer_options` — static, holds 2–6 answer options per question
-- `fact_predictions` — streaming, one row per vote, `CLUSTER BY (predicted_at, question_id)`
+**Four Interactive Tables, all in `DEMO_IWT_WH`:**
+
+| Table | Type | Written by |
+|-------|------|-----------|
+| `dim_questions` | Static (INSERT OVERWRITE) | SPCS admin API |
+| `dim_answer_options` | Static (INSERT OVERWRITE) | SPCS admin API |
+| `fact_predictions` | Streaming | Cloudflare Worker |
+| `dim_voters` | Streaming | Cloudflare Worker (first vote per session) |
+
+## Pages
+
+| Page | URL | Who uses it |
+|------|-----|-------------|
+| Dashboard | `https://<spcs-ingress>/dashboard` | Presenter on laptop/projector |
+| Admin | `https://<spcs-ingress>/admin` | Presenter — create questions |
+| Vote | `https://demo-predictions-worker.<subdomain>.workers.dev` | Audience — scan QR code |
 
 ## Prerequisites
 
 - Snowflake account in an [Interactive Tables supported region](https://docs.snowflake.com/en/user-guide/interactive#region-availability)
 - SPCS enabled (`SHOW PARAMETERS LIKE 'ENABLE_ACCOUNT_LEVEL_COMPUTE_POOL' IN ACCOUNT`)
-- Docker installed
+- Docker installed (linux/amd64 builds required for SPCS)
 - `snow` CLI installed (`pip install snowflake-cli`)
+- Cloudflare account (Workers free tier is sufficient)
+- `wrangler` CLI (`npm install` in `cloudflare-worker/`)
 
-## Deployment Steps
+## Deployment
 
-### 1. Generate RSA key pair
+### 1. Snowflake Setup
 
-```bash
-openssl genrsa -out rsa_key.p8 2048
-openssl rsa -in rsa_key.p8 -pubout -out rsa_key.pub
+Run `sql/01_setup.sql` as `ACCOUNTADMIN` in a Snowsight worksheet.
+
+**Important**: After setup, run the dim_voters block separately since it must come after the Interactive Warehouse is created:
+
+```sql
+CREATE INTERACTIVE TABLE IF NOT EXISTS DEMO_PREDICTIONS_DB.PUBLIC.dim_voters (
+    session_id VARCHAR(36) NOT NULL, question_id VARCHAR(36) NOT NULL,
+    voter_email VARCHAR(255),
+    country VARCHAR(2), region VARCHAR(100), city VARCHAR(100),
+    latitude FLOAT, longitude FLOAT, timezone VARCHAR(64),
+    device_type VARCHAR(20), os VARCHAR(50), browser VARCHAR(50),
+    language VARCHAR(20), voted_at TIMESTAMP_NTZ
+) CLUSTER BY (question_id, country);
+
+ALTER WAREHOUSE DEMO_IWT_WH ADD TABLES (DEMO_PREDICTIONS_DB.PUBLIC.dim_voters);
+GRANT SELECT, INSERT ON TABLE DEMO_PREDICTIONS_DB.PUBLIC.dim_voters TO ROLE DEMO_SERVICE_ROLE;
 ```
 
-Keep `rsa_key.p8` private — it never leaves your machine except to be pasted into the Snowflake Secret.
-
-### 2. Run the setup SQL
-
-1. Open Snowsight and sign in as `ACCOUNTADMIN`
-2. Open a new SQL worksheet
-3. Paste the contents of `sql/01_setup.sql`
-4. **Before running**: find the two placeholder lines near the bottom:
-   - `ALTER USER DEMO_SERVICE_USER SET RSA_PUBLIC_KEY='...'` — paste the public key content (without `-----BEGIN/END PUBLIC KEY-----` headers)
-   - `SECRET_STRING = '<paste_rsa_private_key_pem_here>'` — paste the full private key PEM (including headers)
-5. Run all statements
-
-Note the image repository URL printed by `SHOW IMAGE REPOSITORIES` — you need it for the next step.
-
-### 3. Build and push the Docker image
+### 2. Cloudflare Worker
 
 ```bash
-# Get your registry URL from the setup SQL output, or run:
-# SELECT SYSTEM$REGISTRY_URL()  -- in Snowsight
-
-REGISTRY_URL="<org>-<account>.registry.snowflakecomputing.com"
-
-docker build -t predictions-api .
-
-docker tag predictions-api ${REGISTRY_URL}/demo_predictions_db/public/demo_img_repo/predictions-api:latest
-
-# Authenticate to the registry
-docker login ${REGISTRY_URL} -u <your_snowflake_user>
-
-docker push ${REGISTRY_URL}/demo_predictions_db/public/demo_img_repo/predictions-api:latest
+cd cloudflare-worker
+npm install
 ```
 
-### 4. Edit snowflake.yml
+Set secrets (run each command and paste value when prompted):
+```bash
+npx wrangler secret put SNOWFLAKE_ACCOUNT      # e.g. sfsenorthamerica-demo98
+npx wrangler secret put SNOWFLAKE_USER          # DEMO_SERVICE_USER
+npx wrangler secret put SNOWFLAKE_PRIVATE_KEY   # contents of rsa_key_pkcs8.p8
+npx wrangler secret put SNOWFLAKE_DATABASE      # DEMO_PREDICTIONS_DB
+npx wrangler secret put SNOWFLAKE_SCHEMA        # PUBLIC
+npx wrangler secret put SNOWFLAKE_ROLE          # DEMO_SERVICE_ROLE
+```
 
-Open `snowflake.yml` and replace:
-- `<ORG>-<ACCOUNT>` with your org-account identifier (run `SELECT CURRENT_ORGANIZATION_NAME() || '-' || CURRENT_ACCOUNT_NAME()` in Snowsight)
-- `<choose-a-token>` with any secret string you'll use as the admin password
+> **Note**: The RSA private key must be in PKCS#8 format. Convert with:
+> `openssl pkcs8 -topk8 -nocrypt -in rsa_key.p8 -out rsa_key_pkcs8.p8`
 
-### 5. Deploy the SPCS service
+Deploy:
+```bash
+npx wrangler deploy
+```
 
-In Snowsight (as ACCOUNTADMIN or a role with SPCS privileges):
+Copy the Worker URL (e.g. `https://demo-predictions-worker.jtaosandbox.workers.dev`) and update `PUBLIC_VOTE_URL` in `snowflake.yml`.
+
+### 3. Build and Push the Docker Image
+
+```bash
+# Must be on VPN for SE demo accounts
+docker build --platform linux/amd64 -t demo-predictions .
+
+# Tag for registry (get exact URL from SHOW IMAGE REPOSITORIES)
+docker tag demo-predictions <registry-url>/demo_predictions_db/public/demo_img_repo/predictions-api:latest
+
+# Authenticate (key-pair auth required — not PAT)
+snow spcs image-registry login --connection <your-connection>
+
+docker push <registry-url>/demo_predictions_db/public/demo_img_repo/predictions-api:latest
+```
+
+> **Registry auth gotcha**: PAT-based snow connections fail for `image-registry login`.
+> Use a key-pair (`SNOWFLAKE_JWT`) or username/password connection.
+> Always verify the exact repository name with `SHOW IMAGE REPOSITORIES IN SCHEMA DEMO_PREDICTIONS_DB.PUBLIC` before tagging.
+
+### 4. Deploy the SPCS Service
 
 ```sql
 USE ROLE ACCOUNTADMIN;
-USE DATABASE DEMO_PREDICTIONS_DB;
-USE SCHEMA PUBLIC;
 
-CREATE SERVICE DEMO_SERVICE
+CREATE SERVICE DEMO_PREDICTIONS_DB.PUBLIC.DEMO_SERVICE
   IN COMPUTE POOL DEMO_CPU_POOL
   FROM SPECIFICATION $$
-<paste full contents of snowflake.yml here>
+spec:
+  containers:
+    - name: predictions-api
+      image: /demo_predictions_db/public/demo_img_repo/predictions-api:latest
+      env:
+        SNOWFLAKE_ACCOUNT: "<org>-<account>"
+        SNOWFLAKE_DATABASE: "DEMO_PREDICTIONS_DB"
+        SNOWFLAKE_SCHEMA: "PUBLIC"
+        SNOWFLAKE_ROLE: "ACCOUNTADMIN"
+        PUBLIC_VOTE_URL: "https://demo-predictions-worker.<subdomain>.workers.dev"
+      resources:
+        requests: { cpu: "0.5", memory: 512M }
+        limits:   { cpu: "1",   memory: 1G   }
+  endpoints:
+    - name: api
+      port: 8080
+      public: true
+  networkPolicyConfig:
+    allowInternetEgress: true
+capabilities:
+  securityContext:
+    enableCustomCredentials: true
 $$
-EXTERNAL_ACCESS_INTEGRATIONS = (DEMO_EAI)
-COMMENT = 'Interactive Tables Live Poll Demo';
-```
+  EXTERNAL_ACCESS_INTEGRATIONS = (DEMO_EAI)
+  MIN_INSTANCES = 1 MAX_INSTANCES = 1 AUTO_RESUME = TRUE;
 
-Wait ~2 minutes for the service to start:
-```sql
+GRANT SERVICE ROLE DEMO_PREDICTIONS_DB.PUBLIC.DEMO_SERVICE!ALL_ENDPOINTS_USAGE TO ROLE PUBLIC;
+
+-- Monitor startup
 SELECT SYSTEM$GET_SERVICE_STATUS('DEMO_PREDICTIONS_DB.PUBLIC.DEMO_SERVICE');
 ```
-
-### 6. Get the public URL
-
-```sql
-SHOW ENDPOINTS IN SERVICE DEMO_PREDICTIONS_DB.PUBLIC.DEMO_SERVICE;
-```
-
-Copy the `ingress_url` value. This is the base URL for all three pages.
-
-### 7. You're ready
-
-| Page | URL | Who uses it |
-|---|---|---|
-| Dashboard | `https://<ingress_url>/dashboard` | Presenter — open on laptop/projector |
-| Vote | `https://<ingress_url>/vote` | Audience — scan QR code from dashboard |
-| Admin | `https://<ingress_url>/admin` | Presenter — create and activate questions |
 
 ## Demo Flow
 
 1. Open `/dashboard` on your projector screen
-2. Open `/admin` in a separate tab — enter your `ADMIN_TOKEN`
-3. Create a question with 2–4 answer options and click **Activate Question**
-4. The dashboard updates immediately — the QR code is ready
-5. Audience scans QR code with their phones and votes
+2. Open `/admin` in a separate tab — no password needed (gated by Snowflake SSO)
+3. Create a question with 2–6 options; optionally enable:
+   - **Allow multiple votes** — audience can vote repeatedly
+   - **Require email** — captures email before showing vote options
+4. The dashboard updates: QR code appears, bar chart ready
+5. Audience scans QR code → votes on their phones
 6. Watch the bar chart update sub-second as votes arrive
-7. Point out the **Freshness** metric: milliseconds since last vote hit Snowflake
-8. Click **Compare Interactive vs Standard** — same 3-table JOIN, both warehouses
-9. Interactive: ~100ms. Standard: ~3–5 seconds. That's the story.
+7. Point out **Pipeline Latency**: milliseconds from button press → Snowflake → dashboard
+8. Click **Compare Interactive vs Standard** — same query, two warehouses
+9. Switch to **Audience** tab — live world map with voter locations + device breakdown
+10. Interactive: ~10ms. Standard: ~250ms. That's the story.
+11. To reset for a fresh run without changing the question, click **Reset Session** in Admin
+
+## Local Development
+
+Use the mock dev server to iterate on `dashboard.html` without any Docker build:
+
+```bash
+python3 dev-server.py
+# Open http://localhost:8080/dashboard
+# Edit dashboard.html and Cmd+Shift+R to see changes instantly
+```
+
+## Features
+
+- **Multiple votes mode**: Admin toggle per question — when enabled, audience can vote repeatedly; vote page shows a brief toast and resets instead of navigating away
+- **Require email**: Admin toggle per question — when enabled, audience must enter their email before voting options are shown; stored in `dim_voters.voter_email`
+- **Session reset**: Admin "Reset Session" button clears the vote window start time so a new question session starts fresh without redeploying
+- **Pipeline latency**: Measures button-press → Worker receipt → Snowflake table visible → dashboard read. Uses `fact_predictions.server_received_at` (Worker server clock) minus `CURRENT_TIMESTAMP` at query time for accuracy. Snapshots on the first new vote detected per poll cycle.
+- **Audience tab**: Live Leaflet map with voter lat/lng from Cloudflare geo, US state borders, country outlines (all vendored — no external tile CDN). Resets automatically when a new question is activated. Device breakdown below.
+- **Warehouse comparison**: Same 3-table JOIN run on Interactive vs Standard warehouse side-by-side
 
 ## Cleanup
 
-Run `sql/02_cleanup.sql` as `ACCOUNTADMIN` immediately after the demo.
+```sql
+-- Run sql/02_cleanup.sql as ACCOUNTADMIN immediately after the demo
+```
 
-> **Important**: The Interactive Warehouse bills a minimum of 1 hour from creation, then per-second after that. The compute pool also incurs charges while running. Tear down promptly.
+> Tear down promptly — the Interactive Warehouse and compute pool continue to accrue credits until suspended or dropped.
+
+## Cost Estimate
+
+Credit rates from [Snowflake Service Consumption Table](https://www.snowflake.com/legal-files/CreditConsumptionTable.pdf) (effective July 14, 2026):
+
+| Resource | Config | Rate |
+|---|---|---|
+| `DEMO_IWT_WH` | XSmall Interactive Warehouse | **0.6 credits/hr** (40% cheaper than standard) |
+| `DEMO_CPU_POOL` | `CPU_X64_XS`, 1 node (SPCS) | **0.06 credits/node/hr** |
+| `DEMO_STD_WH` | XSmall Standard Warehouse (fallback) | **1.0 credits/hr** |
+| Snowpipe Streaming | Per GB ingested | negligible at demo volumes |
+
+### Key billing notes
+
+- **Interactive Warehouse minimum billable period is 1 hour** (standard warehouses are 1 minute). Every resume starts a new 1-hour minimum.
+- **Interactive Warehouse minimum `AUTO_SUSPEND` is 24 hours** — it won't auto-suspend during a day-long demo session.
+- **SPCS compute pool** auto-suspends after 1 hour of inactivity (`AUTO_SUSPEND_SECS = 3600`).
+- **`DEMO_STD_WH`** auto-suspends after 60 seconds of inactivity — cost is proportional to audience activity.
+
+### 24-hour running cost
+
+| Component | Active hours | Credits |
+|---|---|---|
+| `DEMO_IWT_WH` (always-on) | 24 | **14.4** |
+| `DEMO_CPU_POOL` SPCS (1 node) | 24 | **1.44** |
+| `DEMO_STD_WH` (used during votes) | 4–12 | **4–12** |
+| Snowpipe Streaming | — | **~0.05** |
+| **Total** | | **~20–28 credits** |
+
+At $3/credit (standard platform rate): **~$60–84 / 24 hours**
+
+For a typical 1–2 hour demo session:
+- Suspend `DEMO_IWT_WH` immediately after: costs ~1–2 credits for the IWT (1hr minimum)
+- SPCS pool: 0.06–0.12 credits
+- Total for a single session: **~2–5 credits (~$6–15)**
 
 ## File Reference
 
 ```
 demo-predictions/
-├── main.py               FastAPI app — all endpoints, rate limiting, dedup
-├── streamer.py           Snowpipe Streaming SDK wrapper
-├── config.py             Environment-based config
+├── main.py                FastAPI — results, voters, config, compare APIs
+├── config.py              SPCS OAuth token config
+├── dev-server.py          Local mock server for dashboard development
 ├── static/
-│   ├── admin.html        Admin: create + activate questions (bearer token protected)
-│   ├── vote.html         Mobile voting page (dynamic multi-choice)
-│   ├── dashboard.html    Presenter dashboard (bar chart + speed comparison)
-│   └── qrcode.min.js     Vendored QR code library (no CDN)
+│   ├── admin.html         Create questions, allow-multiple-votes toggle
+│   ├── dashboard.html     Presenter screen (bar chart + map + comparison)
+│   ├── qrcode.min.js      Vendored QR code library
+│   ├── leaflet.min.js     Vendored Leaflet map library
+│   ├── leaflet.min.css    Vendored Leaflet styles
+│   ├── world.geojson      Simplified world country borders (110m)
+│   └── us-states.geojson  US state borders overlay
+├── cloudflare-worker/
+│   └── src/index.js       Worker: vote page, Snowpipe Streaming, geo metadata
 ├── sql/
-│   ├── 01_setup.sql      Full Snowflake provisioning
-│   └── 02_cleanup.sql    Full teardown
+│   ├── 01_setup.sql       Full Snowflake provisioning
+│   └── 02_cleanup.sql     Full teardown
 ├── Dockerfile
-├── snowflake.yml         SPCS service spec
+├── snowflake.yml          SPCS service spec
 ├── requirements.txt
 └── README.md
 ```
 
 ## Security Notes
 
-- The RSA private key is stored in a Snowflake Secret and injected at runtime by SPCS — it is never in the Docker image or on disk after deployment
-- The admin token is only required for `POST /api/question` — voting endpoints are unauthenticated by design (audience should not need accounts)
-- Rate limiting: 10 requests/minute per IP; one vote per browser session per question
-- No PII is collected: session IDs are browser-generated UUIDs, no names or accounts required
-- CORS is restricted to same-origin by FastAPI defaults
+- No admin token — admin page is protected by Snowflake SSO (SPCS public endpoint requires Snowflake login)
+- Vote page is public (Cloudflare Worker) — no Snowflake auth required for audience
+- Rate limiting: 15 requests/minute per IP in the Worker
+- One vote per browser session per question (unless allow-multiple-votes enabled)
+- Geo data (country, city, lat/lng) captured server-side from Cloudflare edge — no browser location permission requested
+- Session IDs are browser-generated UUIDs — no PII collected

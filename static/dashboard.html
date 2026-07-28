@@ -2,8 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src * data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src *; font-src *;">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Live Poll Dashboard</title>
+<link rel="stylesheet" href="/static/leaflet.min.css">
 <style>
   :root {
     --bg:      #0f1117;
@@ -13,7 +15,6 @@
     --muted:   #8892a4;
     --accent:  #29b5e8;
     --radius:  12px;
-  }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -197,7 +198,7 @@
   }
   .kpi-lbl { font-size: 0.7rem; color: var(--muted); margin-top: 3px; }
 
-  /* Freshness */
+  /* Pipeline Latency */
   #freshness-val { font-size: 1.8rem; font-weight: 800; color: var(--accent); }
   .freshness-note { font-size: 0.72rem; color: var(--muted); }
 
@@ -312,6 +313,50 @@
     margin-right: 4px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Tabs */
+  .tab-bar {
+    display: flex;
+    gap: 4px;
+    padding: 0 28px;
+    margin-top: -8px;
+    margin-bottom: 8px;
+  }
+  .tab-btn {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.82rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    padding: 6px 12px;
+    text-transform: uppercase;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  /* Audience panel */
+  #voter-map { background: #091928; }
+  .audience-section { margin-bottom: 20px; }
+  .country-row { display:flex; align-items:center; gap:8px; margin-bottom:7px; font-size:0.88rem; }
+  .country-flag { font-size:1.1rem; width:22px; text-align:center; flex-shrink:0; }
+  .country-name { flex:1; color:var(--text); }
+  .country-bar-track { width:80px; height:6px; background:var(--border); border-radius:3px; overflow:hidden; }
+  .country-bar-fill  { height:100%; background:var(--accent); border-radius:3px; transition:width 0.4s ease; }
+  .country-count { color:var(--muted); font-size:0.8rem; min-width:28px; text-align:right; }
+  .device-row { display:flex; gap:8px; margin-top:8px; }
+  .device-pill {
+    flex:1; padding:10px 6px; background:var(--surface); border:1px solid var(--border);
+    border-radius:8px; text-align:center;
+  }
+  .device-icon { font-size:1.2rem; }
+  .device-pct  { font-size:1rem; font-weight:800; color:var(--accent); margin-top:2px; }
+  .device-lbl  { font-size:0.7rem; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+  .audience-stat { font-size:0.82rem; color:var(--muted); margin-bottom:12px; }
+  .audience-stat strong { color: var(--text); }
 </style>
 </head>
 <body>
@@ -323,6 +368,12 @@
   <div id="question-header" class="empty">Waiting for a question...</div>
 </header>
 
+<!-- Tab bar -->
+<div class="tab-bar">
+  <button class="tab-btn active" id="tab-votes" onclick="switchTab('votes')">Votes</button>
+  <button class="tab-btn" id="tab-audience" onclick="switchTab('audience')">Audience</button>
+</div>
+
 <!-- Main: Bar chart -->
 <main>
   <div id="no-question">
@@ -330,6 +381,16 @@
     <p>No active question — open <strong>/admin</strong> to create one.</p>
   </div>
   <div id="chart-area" style="display:none"></div>
+  <!-- Audience panel (shown when audience tab active) -->
+  <div id="audience-panel">
+    <div id="voter-map" style="width:100%;height:400px;border-radius:10px;overflow:hidden;"></div>
+    <div class="device-row" id="device-row" style="margin-top:10px;">
+      <div class="device-pill"><div class="device-icon">📱</div><div class="device-pct" id="dev-mobile">—</div><div class="device-lbl">Mobile</div></div>
+      <div class="device-pill"><div class="device-icon">💻</div><div class="device-pct" id="dev-desktop">—</div><div class="device-lbl">Desktop</div></div>
+      <div class="device-pill"><div class="device-icon">📟</div><div class="device-pct" id="dev-tablet">—</div><div class="device-lbl">Tablet</div></div>
+      <div class="device-pill" style="flex:1.5;"><div class="device-icon">🌍</div><div class="device-pct" id="aud-total-map">—</div><div class="device-lbl">Voters</div></div>
+    </div>
+  </div>
 </main>
 
 <!-- Sidebar -->
@@ -350,7 +411,7 @@
     </div>
   </div>
 
-  <!-- Freshness -->
+  <!-- Pipeline Latency -->
   <div class="side-section">
     <div class="side-label">Pipeline Latency</div>
     <div class="kpi-card" style="text-align:center">
@@ -404,6 +465,8 @@
 
 <!-- Vendored QR code library (no CDN) -->
 <script src="/static/qrcode.min.js"></script>
+<!-- Vendored Leaflet (no CDN) -->
+<script src="/static/leaflet.min.js"></script>
 
 <script>
 // ---------------------------------------------------------------------------
@@ -412,6 +475,10 @@
 // Vote URL — uses the public Cloudflare Worker URL if configured,
 // otherwise falls back to this SPCS origin (for authenticated demos).
 let voteUrl = window.location.origin + '/vote';
+let prevTotalVotes    = -1;
+let snapshotLatencyMs = null;
+let latencyBaselineSet = false;
+
 fetch('/api/config')
   .then(r => r.json())
   .then(d => {
@@ -465,27 +532,44 @@ function renderChart(data) {
     qHeader.classList.add('empty');
     document.getElementById('kpi-total').textContent     = '—';
     document.getElementById('kpi-vps').textContent       = '—';
-    document.getElementById('freshness-val').textContent = '—';
+    document.getElementById('freshness-val').textContent  = '—';
+    document.getElementById('freshness-note').textContent = 'cast a vote to measure e2e latency';
     document.getElementById('footer-query-ms').textContent = '—';
+    prevTotalVotes    = -1;
+    snapshotLatencyMs = null;
+    latencyBaselineSet = false;
     return;
   }
 
   noQ.style.display       = 'none';
-  chartArea.style.display = 'flex';
+  if (_activeTab === 'votes') {
+    chartArea.style.display = 'flex';
+    document.getElementById('audience-panel').style.display = 'none';
+  } else {
+    chartArea.style.display = 'none';
+    document.getElementById('audience-panel').style.display = 'block';
+  }
   qHeader.textContent     = data.question_text;
   qHeader.classList.remove('empty');
 
   // KPIs
-  document.getElementById('kpi-total').textContent     = data.total_votes;
+  const newTotal = data.total_votes;
+  document.getElementById('kpi-total').textContent     = newTotal;
   document.getElementById('kpi-vps').textContent       = data.votes_per_sec;
-  // Show pipeline latency only when a vote just landed (< 10s old = meaningful e2e measurement)
-  const FRESHNESS_THRESHOLD_MS = 10000;
-  const fms = data.freshness_ms;
+
+  // Snapshot pipeline latency the first time a new vote is detected after baseline
+  if (!latencyBaselineSet) {
+    prevTotalVotes    = newTotal;
+    latencyBaselineSet = true;
+  } else if (newTotal > prevTotalVotes && data.freshness_ms != null) {
+    snapshotLatencyMs = data.freshness_ms;
+    prevTotalVotes    = newTotal;
+  }
   const freshnessEl   = document.getElementById('freshness-val');
   const freshnessNote = document.getElementById('freshness-note');
-  if (fms != null && fms < FRESHNESS_THRESHOLD_MS) {
-    freshnessEl.textContent   = fms + 'ms';
-    freshnessNote.textContent = 'vote-to-dashboard, end-to-end';
+  if (snapshotLatencyMs != null) {
+    freshnessEl.textContent   = snapshotLatencyMs + 'ms';
+    freshnessNote.textContent = 'button press → table → dashboard';
   } else {
     freshnessEl.textContent   = '—';
     freshnessNote.textContent = 'cast a vote to measure e2e latency';
@@ -547,6 +631,169 @@ async function refresh() {
 
 refresh();
 setInterval(refresh, 1500);
+
+// ---------------------------------------------------------------------------
+// Tab switching
+// ---------------------------------------------------------------------------
+let _activeTab = 'votes';
+
+function switchTab(tab) {
+  _activeTab = tab;
+  document.getElementById('tab-votes').classList.toggle('active', tab === 'votes');
+  document.getElementById('tab-audience').classList.toggle('active', tab === 'audience');
+  const chartArea  = document.getElementById('chart-area');
+  const audPanel   = document.getElementById('audience-panel');
+  const noQ        = document.getElementById('no-question');
+  if (tab === 'audience') {
+    chartArea.style.display = 'none';
+    // Show audience panel only if there's an active question
+    audPanel.style.display  = noQ.style.display === 'none' ? 'block' : 'none';
+    refreshAudience();
+    setTimeout(() => { if (_map) _map.invalidateSize(); }, 50);
+  } else {
+    audPanel.style.display  = 'none';
+    chartArea.style.display = noQ.style.display === 'none' ? 'flex' : 'none';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Country flag emoji lookup (top 40+ countries)
+// ---------------------------------------------------------------------------
+const FLAG = {
+  US:'🇺🇸',GB:'🇬🇧',CA:'🇨🇦',AU:'🇦🇺',DE:'🇩🇪',FR:'🇫🇷',JP:'🇯🇵',CN:'🇨🇳',IN:'🇮🇳',BR:'🇧🇷',
+  MX:'🇲🇽',KR:'🇰🇷',IT:'🇮🇹',ES:'🇪🇸',NL:'🇳🇱',SE:'🇸🇪',NO:'🇳🇴',DK:'🇩🇰',FI:'🇫🇮',CH:'🇨🇭',
+  SG:'🇸🇬',HK:'🇭🇰',NZ:'🇳🇿',ZA:'🇿🇦',AE:'🇦🇪',SA:'🇸🇦',IL:'🇮🇱',PL:'🇵🇱',CZ:'🇨🇿',AT:'🇦🇹',
+  BE:'🇧🇪',PT:'🇵🇹',IE:'🇮🇪',RU:'🇷🇺',TR:'🇹🇷',ID:'🇮🇩',TH:'🇹🇭',VN:'🇻🇳',PH:'🇵🇭',MY:'🇲🇾',
+  AR:'🇦🇷',CO:'🇨🇴',CL:'🇨🇱',PK:'🇵🇰',NG:'🇳🇬',EG:'🇪🇬',GH:'🇬🇭',KE:'🇰🇪',UA:'🇺🇦',HU:'🇭🇺',
+};
+
+// ---------------------------------------------------------------------------
+// Audience data polling
+// ---------------------------------------------------------------------------
+async function refreshAudience() {
+  if (_activeTab !== 'audience') return;
+  try {
+    const resp = await fetch('/api/voters');
+    const data = await resp.json();
+    renderAudience(data);
+  } catch (e) { console.error('audience refresh error:', e); }
+}
+
+// ---------------------------------------------------------------------------
+// Leaflet map for audience panel
+// ---------------------------------------------------------------------------
+let _map = null;
+let _markerLayer = null;
+const _knownPoints = new Map(); // "lat,lng" -> marker
+let _currentAudienceQuestionId = null;
+
+function ensureMap() {
+  if (_map) return;
+  _map = L.map('voter-map', {
+    zoomControl: true,
+    attributionControl: false,
+    minZoom: 1,
+    maxZoom: 8,
+    backgroundColor: '#091928'
+  }).setView([20, 0], 2);
+
+  // Custom pane so voter dots always render above the GeoJSON country layer
+  _map.createPane('voterPane');
+  _map.getPane('voterPane').style.zIndex = 650;
+
+  _markerLayer = L.featureGroup().addTo(_map);
+
+  // Load vendored GeoJSON world map — no external tiles needed
+  fetch('/static/world.geojson')
+    .then(r => r.json())
+    .then(data => {
+      L.geoJSON(data, {
+        style: {
+          color: '#4a90a4',
+          weight: 0.8,
+          fillColor: '#1e3a4a',
+          fillOpacity: 1,
+        }
+      }).addTo(_map);
+      // Keep voter dots above the country layer
+      _map.getPane('voterPane').style.zIndex = 650;
+    })
+    .catch(err => console.warn('world.geojson load failed:', err));
+
+  // Load US state borders as an overlay
+  fetch('/static/us-states.geojson')
+    .then(r => r.json())
+    .then(data => {
+      L.geoJSON(data, {
+        style: {
+          color: '#5aa0b8',
+          weight: 0.5,
+          fill: false,        // transparent fill — only draw borders
+        }
+      }).addTo(_map);
+    })
+    .catch(() => {});
+}
+
+function renderAudience(data) {
+  if (!data.active) return;
+
+  ensureMap();
+
+  // Reset map when question changes
+  if (data.question_id !== _currentAudienceQuestionId) {
+    _knownPoints.clear();
+    if (_markerLayer) _markerLayer.clearLayers();
+    document.getElementById('aud-total-map').textContent = '—';
+    document.getElementById('dev-mobile').textContent  = '—';
+    document.getElementById('dev-desktop').textContent = '—';
+    document.getElementById('dev-tablet').textContent  = '—';
+    _currentAudienceQuestionId = data.question_id;
+  }
+
+  const total = data.total_unique_voters || 0;
+  document.getElementById('aud-total-map').textContent = total || '—';
+
+  // Plot voter location dots
+  const points = data.points || [];
+  points.forEach(p => {
+    const key = `${p.lat},${p.lng}`;
+    const radius = Math.max(6, Math.min(20, 6 + Math.sqrt(p.count) * 4));
+    if (_knownPoints.has(key)) {
+      // Update existing marker radius
+      _knownPoints.get(key).setRadius(radius);
+    } else {
+      const marker = L.circleMarker([p.lat, p.lng], {
+        pane: 'voterPane',
+        radius,
+        color: '#29b5e8',
+        fillColor: '#29b5e8',
+        fillOpacity: 0.7,
+        weight: 1.5,
+        opacity: 0.9,
+      }).addTo(_markerLayer);
+
+      const label = [p.city, p.region, p.country].filter(Boolean).join(', ');
+      const tooltipText = `${label} · ${p.count} voter${p.count !== 1 ? 's' : ''}`;
+      marker.bindTooltip(tooltipText, { permanent: false, direction: 'top' });
+      _knownPoints.set(key, marker);
+    }
+  });
+
+  // Auto-fit bounds to markers if we have some
+  if (_markerLayer.getLayers().length > 0 && points.length <= 3) {
+    try { _map.fitBounds(_markerLayer.getBounds(), { padding: [40, 40], maxZoom: 6 }); } catch {}
+  }
+
+  // Devices
+  const d = data.devices || {};
+  const dTotal = (d.mobile || 0) + (d.desktop || 0) + (d.tablet || 0) || 1;
+  document.getElementById('dev-mobile').textContent  = Math.round((d.mobile  || 0) / dTotal * 100) + '%';
+  document.getElementById('dev-desktop').textContent = Math.round((d.desktop || 0) / dTotal * 100) + '%';
+  document.getElementById('dev-tablet').textContent  = Math.round((d.tablet  || 0) / dTotal * 100) + '%';
+}
+
+setInterval(refreshAudience, 2000);
 
 // ---------------------------------------------------------------------------
 // Warehouse speed comparison

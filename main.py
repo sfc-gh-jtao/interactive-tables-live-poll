@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 # In-memory state
 # ---------------------------------------------------------------------------
 _active_question: dict | None = None
+_session_start_at: str = '1970-01-01 00:00:00'  # UTC; set on new question or reset
 _results_cache:   dict = {}
 _results_cache_ts: float = 0.0
 
@@ -87,6 +88,7 @@ class QuestionRequest(BaseModel):
     category: str = ""
     options: list[str]
     allow_multiple_votes: bool = False
+    require_email: bool = False
 
     @field_validator("question_text")
     @classmethod
@@ -109,7 +111,7 @@ class QuestionRequest(BaseModel):
 
 @app.post("/api/question")
 async def create_question(req: QuestionRequest):
-    global _active_question, _results_cache, _results_cache_ts
+    global _active_question, _results_cache, _results_cache_ts, _voters_cache, _voters_cache_ts, _session_start_at
 
     question_id = str(uuid.uuid4())
     options = [
@@ -127,9 +129,9 @@ async def create_question(req: QuestionRequest):
         cur  = conn.cursor()
         cur.execute(
             """INSERT OVERWRITE INTO dim_questions
-               (question_id, question_text, context_text, category, is_active, allow_multiple_votes, created_at)
-               VALUES (%s, %s, %s, %s, TRUE, %s, CURRENT_TIMESTAMP())""",
-            (question_id, req.question_text, req.context_text, req.category, req.allow_multiple_votes),
+               (question_id, question_text, context_text, category, is_active, allow_multiple_votes, require_email, created_at)
+               VALUES (%s, %s, %s, %s, TRUE, %s, %s, CURRENT_TIMESTAMP())""",
+            (question_id, req.question_text, req.context_text, req.category, req.allow_multiple_votes, req.require_email),
         )
         values_sql  = ", ".join(["(%s, %s, %s, %s)"] * len(options))
         flat_params = []
@@ -151,11 +153,15 @@ async def create_question(req: QuestionRequest):
         "context_text":          req.context_text,
         "category":              req.category,
         "allow_multiple_votes":  req.allow_multiple_votes,
+        "require_email":         req.require_email,
         "options":               options,
         "option_ids":            {opt["option_id"] for opt in options},
     }
     _results_cache    = {}
     _results_cache_ts = 0.0
+    _voters_cache     = {}
+    _voters_cache_ts  = 0.0
+    _session_start_at = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
 
     logger.info("Activated question: %s (%d options)", question_id, len(options))
     return {"question_id": question_id, "options": len(options)}
@@ -174,6 +180,7 @@ async def get_active():
         "question_text":        _active_question["question_text"],
         "context_text":         _active_question["context_text"],
         "allow_multiple_votes": _active_question.get("allow_multiple_votes", False),
+        "require_email":         _active_question.get("require_email", False),
         "options": [
             {"option_id": o["option_id"], "option_text": o["option_text"], "display_order": o["display_order"]}
             for o in _active_question["options"]
@@ -194,14 +201,13 @@ SELECT
         / NULLIF(SUM(COUNT(p.prediction_id)) OVER (), 0), 1
     )                                                                     AS vote_pct,
     DATEDIFF('millisecond',
-        MAX(p.predicted_at),
+        MAX(COALESCE(p.server_received_at, p.predicted_at)),
         CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ
     )                                                                     AS freshness_ms
 FROM dim_answer_options a
 LEFT JOIN fact_predictions p
        ON a.option_id    = p.option_id
-      AND p.predicted_at >= DATEADD('hour', -2,
-              CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)
+      AND p.predicted_at >= %s::TIMESTAMP_NTZ
 WHERE a.question_id = %s
 GROUP BY a.option_text, a.display_order
 ORDER BY a.display_order
@@ -213,6 +219,7 @@ FROM fact_predictions
 WHERE question_id   = %s
   AND predicted_at >= DATEADD('minute', -1,
           CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)
+  AND predicted_at >= %s::TIMESTAMP_NTZ
 """
 
 
@@ -232,10 +239,10 @@ async def get_results():
         conn = _get_conn(warehouse="DEMO_IWT_WH")
         cur  = conn.cursor()
         t0   = time.perf_counter()
-        cur.execute(_RESULTS_QUERY, (question_id,))
+        cur.execute(_RESULTS_QUERY, (_session_start_at, question_id,))
         rows     = cur.fetchall()
         query_ms = round((time.perf_counter() - t0) * 1000)
-        cur.execute(_VOTES_PER_SEC_QUERY, (question_id,))
+        cur.execute(_VOTES_PER_SEC_QUERY, (question_id, _session_start_at,))
         vps_row      = cur.fetchone()
         votes_per_sec = round(float(vps_row[0] or 0), 1) if vps_row else 0.0
         cur.close()
@@ -250,8 +257,10 @@ async def get_results():
     for row in rows:
         option_text, display_order, vote_count, vote_pct, fms = row
         total_votes += int(vote_count or 0)
-        if fms is not None and freshness_ms is None:
-            freshness_ms = int(fms)
+        if fms is not None:
+            fms_int = int(fms)
+            if freshness_ms is None or fms_int < freshness_ms:
+                freshness_ms = fms_int
         options_out.append({
             "option_text":   option_text,
             "display_order": display_order,
@@ -282,8 +291,7 @@ SELECT a.option_text, COUNT(p.prediction_id) AS vote_count
 FROM dim_answer_options a
 LEFT JOIN fact_predictions p
        ON a.option_id   = p.option_id
-      AND p.predicted_at >= DATEADD('hour', -2,
-              CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)
+      AND p.predicted_at >= %s::TIMESTAMP_NTZ
 WHERE a.question_id = %s
 GROUP BY a.option_text
 ORDER BY a.option_text
@@ -294,7 +302,7 @@ def _run_timed_query(warehouse: str, question_id: str) -> dict:
     conn = _get_conn(warehouse=warehouse)
     cur  = conn.cursor()
     t0   = time.perf_counter()
-    cur.execute(_COMPARE_QUERY, (question_id,))
+    cur.execute(_COMPARE_QUERY, (_session_start_at, question_id,))
     cur.fetchall()
     elapsed_ms = round((time.perf_counter() - t0) * 1000)
     cur.close()
@@ -321,3 +329,111 @@ async def compare_warehouses():
         "standard":    results.get("DEMO_STD_WH"),
         "errors":      errors or None,
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/voters  — geo + device breakdown for the active question
+# ---------------------------------------------------------------------------
+_VOTERS_QUERY = """
+SELECT
+    v.country,
+    v.region,
+    v.city,
+    ROUND(v.latitude,  2) AS lat,
+    ROUND(v.longitude, 2) AS lng,
+    v.device_type,
+    COUNT(DISTINCT v.session_id) AS voter_count
+FROM dim_voters v
+WHERE v.question_id = %s
+  AND v.voted_at    >= %s::TIMESTAMP_NTZ
+  AND v.latitude  IS NOT NULL
+  AND v.longitude IS NOT NULL
+GROUP BY v.country, v.region, v.city, ROUND(v.latitude, 2), ROUND(v.longitude, 2), v.device_type
+ORDER BY voter_count DESC
+"""
+
+_voters_cache: dict = {}
+_voters_cache_ts: float = 0.0
+
+
+@app.get("/api/voters")
+async def get_voters():
+    global _voters_cache, _voters_cache_ts
+
+    if _active_question is None:
+        return {"active": False}
+
+    now_ms = time.time() * 1000
+    if _voters_cache and (now_ms - _voters_cache_ts) < config.CACHE_TTL_MS:
+        return _voters_cache
+
+    question_id = _active_question["question_id"]
+    try:
+        conn = _get_conn(warehouse="DEMO_IWT_WH")
+        cur  = conn.cursor()
+        cur.execute(_VOTERS_QUERY, (question_id, _session_start_at,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        logger.error("Voters query error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Query error: {exc}")
+
+    country_counts: dict = {}
+    points_map: dict = {}   # (lat, lng) -> point dict — merges same-location rows
+    device_counts: dict = {"mobile": 0, "desktop": 0, "tablet": 0}
+    total = 0
+
+    for country, region, city, lat, lng, device_type, voter_count in rows:
+        n = int(voter_count or 0)
+        total += n
+        if country:
+            country_counts[country] = country_counts.get(country, 0) + n
+        if lat is not None and lng is not None:
+            key = (float(lat), float(lng))
+            if key in points_map:
+                points_map[key]["count"] += n
+            else:
+                points_map[key] = {
+                    "lat": float(lat), "lng": float(lng),
+                    "city": city or "", "region": region or "", "country": country or "",
+                    "count": n
+                }
+        dt = (device_type or "desktop").lower()
+        if dt in device_counts:
+            device_counts[dt] = device_counts[dt] + n
+
+    points = list(points_map.values())
+
+    countries_sorted = sorted(
+        [{"country": k, "count": v} for k, v in country_counts.items()],
+        key=lambda x: -x["count"]
+    )[:10]
+
+    _voters_cache = {
+        "active":              True,
+        "question_id":         question_id,
+        "total_unique_voters": total,
+        "countries":           countries_sorted,
+        "points":              points,
+        "devices":             device_counts,
+    }
+    _voters_cache_ts = now_ms
+    return _voters_cache
+
+
+# ---------------------------------------------------------------------------
+# POST /api/reset  — reset session clock for current question (keeps question)
+# ---------------------------------------------------------------------------
+@app.post("/api/reset")
+async def reset_session():
+    global _session_start_at, _results_cache, _results_cache_ts, _voters_cache, _voters_cache_ts
+    if _active_question is None:
+        raise HTTPException(status_code=409, detail="No active question")
+    _session_start_at = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
+    _results_cache    = {}
+    _results_cache_ts = 0.0
+    _voters_cache     = {}
+    _voters_cache_ts  = 0.0
+    logger.info("Session reset at %s", _session_start_at)
+    return {"reset_at": _session_start_at}

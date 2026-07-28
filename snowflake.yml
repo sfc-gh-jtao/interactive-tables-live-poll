@@ -7,10 +7,8 @@ spec:
         SNOWFLAKE_DATABASE: "DEMO_PREDICTIONS_DB"
         SNOWFLAKE_SCHEMA: "PUBLIC"
         SNOWFLAKE_ROLE: "ACCOUNTADMIN"
-        ADMIN_TOKEN: "Snowflake26!"
         # Set to your Cloudflare Worker URL after wrangler deploy
-        # e.g. PUBLIC_VOTE_URL: "https://demo-predictions-worker.<subdomain>.workers.dev"
-        PUBLIC_VOTE_URL: ""
+        PUBLIC_VOTE_URL: "https://demo-predictions-worker.jtaosandbox.workers.dev"
       resources:
         requests:
           cpu: "0.5"

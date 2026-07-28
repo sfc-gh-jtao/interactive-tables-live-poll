@@ -33,7 +33,6 @@ def get_spcs_token() -> str:
     return Path(SPCS_TOKEN_PATH).read_text().strip()
 
 
-ADMIN_TOKEN  = _require("ADMIN_TOKEN")
 CACHE_TTL_MS = int(os.environ.get("CACHE_TTL_MS", "500"))
 
 # URL to the Cloudflare Worker vote page — used by the dashboard QR code.

@@ -249,8 +249,28 @@
     </label>
   </div>
 
+  <div style="display:flex;align-items:center;gap:12px;margin-top:14px;">
+    <label class="toggle-switch-email" for="require-email" style="cursor:pointer;display:flex;align-items:center;gap:10px;">
+      <div style="position:relative;">
+        <input type="checkbox" id="require-email" style="opacity:0;width:0;height:0;position:absolute;">
+        <div id="toggle-track-email" style="width:42px;height:24px;background:var(--border);border-radius:12px;transition:background 0.2s;"></div>
+        <div id="toggle-thumb-email" style="position:absolute;top:3px;left:3px;width:18px;height:18px;background:#fff;border-radius:50%;transition:transform 0.2s;"></div>
+      </div>
+      <span style="font-size:0.9rem;color:var(--text);">Require email before voting</span>
+    </label>
+  </div>
+
   <button class="btn-activate" id="btn-submit" onclick="submitQuestion()">Activate Question</button>
   <div id="status-msg"></div>
+</div>
+
+<!-- Reset Session -->
+<div class="card">
+  <h2>Reset Session</h2>
+  <hr>
+  <p style="font-size:0.88rem;color:var(--muted);margin-bottom:16px;">Resets vote counts and audience data to zero without changing the active question. Use this to start a fresh demo round with the same question.</p>
+  <button class="btn-activate" id="btn-reset" onclick="resetSession()" style="background:var(--danger);">Reset Vote Counts</button>
+  <div id="reset-msg"></div>
 </div>
 
 <!-- Active Question -->
@@ -313,6 +333,7 @@ async function submitQuestion() {
   const inputs = container.querySelectorAll('input[type="text"]');
   const options = Array.from(inputs).map(i => i.value.trim()).filter(Boolean);
   const allowMultipleVotes = document.getElementById('multi-votes').checked;
+  const requireEmail = document.getElementById('require-email').checked;
 
   if (!qText) { showStatus('Question text is required.', 'error'); return; }
   if (options.length < 2) { showStatus('At least 2 answer options are required.', 'error'); return; }
@@ -330,7 +351,8 @@ async function submitQuestion() {
         context_text: qContext,
         category: qCategory,
         options: options,
-        allow_multiple_votes: allowMultipleVotes
+        allow_multiple_votes: allowMultipleVotes,
+        require_email: requireEmail
       })
     });
     if (resp.ok) {
@@ -345,6 +367,8 @@ async function submitQuestion() {
       // Reset toggle
       multiVotesCheckbox.checked = false;
       multiVotesCheckbox.dispatchEvent(new Event('change'));
+      requireEmailCheckbox.checked = false;
+      requireEmailCheckbox.dispatchEvent(new Event('change'));
       refreshActive();
     } else {
       const data = await resp.json().catch(() => ({}));
@@ -422,6 +446,34 @@ function escHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+async function resetSession() {
+  const btn = document.getElementById('btn-reset');
+  const msg = document.getElementById('reset-msg');
+  btn.disabled = true;
+  btn.textContent = 'Resetting...';
+  try {
+    const resp = await fetch('/api/reset', { method: 'POST' });
+    if (resp.ok) {
+      const data = await resp.json();
+      msg.className = 'success';
+      msg.textContent = `Reset at ${data.reset_at} UTC — vote counts cleared.`;
+      msg.style.display = 'block';
+    } else {
+      const data = await resp.json().catch(() => ({}));
+      msg.className = 'error';
+      msg.textContent = `Error: ${data.detail || resp.statusText}`;
+      msg.style.display = 'block';
+    }
+  } catch (e) {
+    msg.className = 'error';
+    msg.textContent = `Network error: ${e.message}`;
+    msg.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Reset Vote Counts';
+  }
+}
+
 // Toggle switch visual
 const multiVotesCheckbox = document.getElementById('multi-votes');
 const toggleTrack = document.getElementById('toggle-track');
@@ -435,10 +487,26 @@ multiVotesCheckbox.addEventListener('change', () => {
     toggleThumb.style.transform = 'translateX(0)';
   }
 });
-// Make the whole label area clickable
 document.querySelector('.toggle-switch').addEventListener('click', () => {
   multiVotesCheckbox.checked = !multiVotesCheckbox.checked;
   multiVotesCheckbox.dispatchEvent(new Event('change'));
+});
+
+const requireEmailCheckbox = document.getElementById('require-email');
+const toggleTrackEmail = document.getElementById('toggle-track-email');
+const toggleThumbEmail = document.getElementById('toggle-thumb-email');
+requireEmailCheckbox.addEventListener('change', () => {
+  if (requireEmailCheckbox.checked) {
+    toggleTrackEmail.style.background = 'var(--accent)';
+    toggleThumbEmail.style.transform = 'translateX(18px)';
+  } else {
+    toggleTrackEmail.style.background = 'var(--border)';
+    toggleThumbEmail.style.transform = 'translateX(0)';
+  }
+});
+document.querySelector('.toggle-switch-email').addEventListener('click', () => {
+  requireEmailCheckbox.checked = !requireEmailCheckbox.checked;
+  requireEmailCheckbox.dispatchEvent(new Event('change'));
 });
 
 // Init
