@@ -195,6 +195,37 @@ python3 dev-server.py
 ```
 
 > Tear down promptly — the Interactive Warehouse and compute pool continue to accrue credits until suspended or dropped.
+>
+> **Important**: SPCS compute pool auto-suspend only triggers when no services are running on it — it does NOT auto-suspend based on HTTP inactivity. You must explicitly suspend the service before the pool will idle down:
+> ```sql
+> ALTER SERVICE DEMO_PREDICTIONS_DB.PUBLIC.DEMO_PREDICTIONS_SERVICE SUSPEND;
+> ALTER COMPUTE POOL DEMO_CPU_POOL SUSPEND;
+> ALTER WAREHOUSE DEMO_IWT_WH SUSPEND;
+> ```
+
+### Interactive Warehouse suspend/resume strategy
+
+Suspending `DEMO_IWT_WH` between events saves 0.6 credits/hr, but there are two billing nuances to understand:
+
+1. **Each resume starts a new 1-hour minimum billing period** — even if you're already mid-period. Frequent suspend/resume cycles cost *more* than leaving it running continuously for a session.
+2. **Cache warmup on resume** — an XS interactive warehouse warms at ~300–400 MB/s. For the demo tables (small dataset), warmup completes in seconds, but the first few queries after a resume will be slower.
+
+**Recommended pattern:**
+
+| Scenario | Action |
+|---|---|
+| Between demo sessions (same day, <2 hr gap) | Leave running — 1-hr minimum makes suspend/resume more expensive |
+| Overnight / multi-day gap | Suspend — saves ~14 credits/day |
+| Morning of a demo | `ALTER WAREHOUSE DEMO_IWT_WH RESUME` 5–10 min before presenting |
+| Demo cancelled / postponed | Suspend immediately |
+
+```sql
+-- Before demo: resume ~5 minutes early to allow cache warmup
+ALTER WAREHOUSE DEMO_IWT_WH RESUME;
+
+-- After demo (if done for the day):
+ALTER WAREHOUSE DEMO_IWT_WH SUSPEND;
+```
 
 ## Cost Estimate
 
@@ -227,9 +258,11 @@ Credit rates from [Snowflake Service Consumption Table](https://www.snowflake.co
 At $3/credit (standard platform rate): **~$60–84 / 24 hours**
 
 For a typical 1–2 hour demo session:
-- Suspend `DEMO_IWT_WH` immediately after: costs ~1–2 credits for the IWT (1hr minimum)
+- Suspend `DEMO_IWT_WH` immediately after: costs ~1–2 credits for the IWT (1hr minimum per resume)
 - SPCS pool: 0.06–0.12 credits
 - Total for a single session: **~2–5 credits (~$6–15)**
+
+> The 24-hour running cost applies only if you leave everything up all day. Suspending the IWT overnight reduces the IWT cost to 0 between sessions — the dominant saving.
 
 ## File Reference
 
