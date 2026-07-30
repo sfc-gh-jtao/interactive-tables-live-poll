@@ -328,32 +328,22 @@ Credit rates from [Snowflake Service Consumption Table](https://www.snowflake.co
 | `DEMO_STD_WH` | XSmall Standard Warehouse (fallback) | **1.0 credits/hr** |
 | Snowpipe Streaming | Per GB ingested | negligible at demo volumes |
 
+### 8-hour hackathon or booth day
+
+| Component | Credits |
+|---|---|
+| `DEMO_IWT_WH` at 0.6/hr × 8 hrs | **4.8** |
+| `DEMO_CPU_POOL` at 0.06/hr × 8 hrs | **0.48** |
+| `DEMO_STD_WH` ~6 hrs active (steady traffic) | **~6** |
+| Snowpipe Streaming | **~0.05** |
+| **Total** | **~11–12 credits (~$33–36 at $3/credit)** |
+
 ### Key billing notes
 
-- **Interactive Warehouse minimum billable period is 1 hour** (standard warehouses are 1 minute). Every resume starts a new 1-hour minimum.
-- **Interactive Warehouse minimum `AUTO_SUSPEND` is 24 hours** — it won't auto-suspend during a day-long demo session.
-- **SPCS compute pool** auto-suspends after 1 hour of inactivity (`AUTO_SUSPEND_SECS = 3600`).
-- **`DEMO_STD_WH`** auto-suspends after 60 seconds of inactivity — cost is proportional to audience activity.
-
-### 24-hour running cost
-
-| Component | Active hours | Credits |
-|---|---|---|
-| `DEMO_IWT_WH` (always-on) | 24 | **14.4** |
-| `DEMO_CPU_POOL` SPCS (1 node) | 24 | **1.44** |
-| `DEMO_STD_WH` (used during votes) | 4–12 | **4–12** |
-| Snowpipe Streaming | — | **~0.05** |
-| **Total** | | **~20–28 credits** |
-
-At $3/credit (standard platform rate): **~$60–84 / 24 hours**
-
-For a typical 8-hour hackathon or booth day:
-- `DEMO_IWT_WH` at 0.6 credits/hr × 8 hours = **4.8 credits**
-- `DEMO_CPU_POOL` at 0.06 credits/hr × 8 hours = **0.48 credits**
-- `DEMO_STD_WH` active ~6 hours (steady voter traffic): **~6 credits**
-- Total for an 8-hour event: **~11–12 credits (~$33–36 at $3/credit)**
-
-> The 24-hour running cost applies only if you leave everything up all day. Suspending the IWT overnight reduces the IWT cost to 0 between sessions — the dominant saving.
+- **Interactive Warehouse minimum billable period is 1 hour** — every resume starts a new 1-hour minimum charge. Avoid frequent suspend/resume cycles within a session.
+- **Interactive Warehouse minimum `AUTO_SUSPEND` is 24 hours** — suspend manually at the end of the day.
+- **SPCS compute pool does not auto-suspend based on HTTP activity** — only suspends when no services are running. Explicitly suspend the service and pool after each event (see Cleanup).
+- **`DEMO_STD_WH`** auto-suspends after 60 seconds of inactivity — cost tracks audience activity naturally.
 
 ## File Reference
 
