@@ -155,7 +155,7 @@ npm install
 **Set Cloudflare Worker secrets** (each command prompts you to paste the value):
 
 ```bash
-npx wrangler secret put SNOWFLAKE_ACCOUNT      # e.g. sfsenorthamerica-demo98
+npx wrangler secret put SNOWFLAKE_ACCOUNT      # e.g. myorg-myaccount
 npx wrangler secret put SNOWFLAKE_USER          # DEMO_SERVICE_USER
 npx wrangler secret put SNOWFLAKE_DATABASE      # DEMO_PREDICTIONS_DB
 npx wrangler secret put SNOWFLAKE_SCHEMA        # PUBLIC

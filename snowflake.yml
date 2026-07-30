@@ -3,12 +3,12 @@ spec:
     - name: predictions-api
       image: /demo_predictions_db/public/demo_img_repo/predictions-api:latest
       env:
-        SNOWFLAKE_ACCOUNT: "sfsenorthamerica-demo98"
+        SNOWFLAKE_ACCOUNT: "<your-snowflake-account>"
         SNOWFLAKE_DATABASE: "DEMO_PREDICTIONS_DB"
         SNOWFLAKE_SCHEMA: "PUBLIC"
         SNOWFLAKE_ROLE: "ACCOUNTADMIN"
         # Set to your Cloudflare Worker URL after wrangler deploy
-        PUBLIC_VOTE_URL: "https://demo-predictions-worker.jtaosandbox.workers.dev"
+        PUBLIC_VOTE_URL: "https://demo-predictions-worker.<your-subdomain>.workers.dev"
       resources:
         requests:
           cpu: "0.5"
