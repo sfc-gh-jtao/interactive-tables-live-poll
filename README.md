@@ -276,7 +276,7 @@ python3 dev-server.py
 - **Audience tab**: Live Leaflet map with voter lat/lng from Cloudflare geo, US state borders, country outlines (all vendored — no external tile CDN). Resets automatically when a new question is activated. Device breakdown below.
 - **Warehouse comparison**: Same 3-table JOIN run on Interactive vs Standard warehouse side-by-side
 
-## Cleanup
+## Cleanup and Subsequent Runs
 
 ```sql
 -- Run sql/02_cleanup.sql as ACCOUNTADMIN immediately after the demo
