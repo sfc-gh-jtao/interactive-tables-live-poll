@@ -48,8 +48,14 @@ function objToB64Url(obj) {
 /**
  * Generate a Snowflake RS256 JWT.
  * The `iss` claim format: ACCOUNT.USER.SHA256:<public-key-fingerprint>
+ * Result is cached for 55 minutes (JWT expires at 60min; 5-min safety buffer).
  */
+let _cachedJwt    = null;
+let _cachedJwtExp = 0;   // epoch ms when the cached token expires
+
 async function generateSnowflakeJWT(env) {
+  const nowMs = Date.now();
+  if (_cachedJwt && nowMs < _cachedJwtExp) return _cachedJwt;
   const account = env.SNOWFLAKE_ACCOUNT.toUpperCase();
   const user    = env.SNOWFLAKE_USER.toUpperCase();
   const pem     = env.SNOWFLAKE_PRIVATE_KEY.replace(/\\n/g, '\n');
@@ -91,7 +97,10 @@ async function generateSnowflakeJWT(env) {
     new TextEncoder().encode(sigInput)
   );
 
-  return `${sigInput}.${bufToB64Url(sig)}`;
+  const token = `${sigInput}.${bufToB64Url(sig)}`;
+  _cachedJwt    = token;
+  _cachedJwtExp = nowMs + 55 * 60 * 1000; // cache for 55 min
+  return token;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,9 +108,12 @@ async function generateSnowflakeJWT(env) {
 // ---------------------------------------------------------------------------
 
 /**
- * Discover the Snowpipe Streaming ingest subdomain hostname.
- * Cached in module-level variable for the Worker instance lifetime (~seconds).
+ * Channel cache for Snowpipe Streaming.
+ * Stores { channel: string, token: string } per pipe so we can skip open_channel
+ * on subsequent appends (saves one round-trip per vote).
+ * On a stale/consumed token the append will fail and we fall back to open+append.
  */
+const _channelCache = {}; // pipe -> { channel, token } | null
 let _cachedIngestHost = null;
 let _cachedAllowMultipleVotes = false; // mirrors current question setting
 
@@ -151,10 +163,10 @@ async function getIngestHostname(jwt, account) {
  * Step 2: Append Rows   → POST /v2/streaming/DATA/databases/.../rows?continuationToken=...
  */
 async function streamVote(jwt, ingestHost, env, row) {
-  const db      = env.SNOWFLAKE_DATABASE;
-  const schema  = env.SNOWFLAKE_SCHEMA;
-  const pipe    = 'FACT_PREDICTIONS-STREAMING';
-  const channel = `CF_VOTE_${Date.now()}_${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+  const db     = env.SNOWFLAKE_DATABASE;
+  const schema = env.SNOWFLAKE_SCHEMA;
+  const pipe   = 'FACT_PREDICTIONS-STREAMING';
+  const channel = 'CF_VOTE_MAIN'; // fixed name — reused across requests
 
   const authHeaders = {
     Authorization: `Bearer ${jwt}`,
@@ -163,7 +175,36 @@ async function streamVote(jwt, ingestHost, env, row) {
     'Accept': 'application/json',
   };
 
-  // Step 1: Open channel
+  /** Append rows using a known continuation token; returns next token on success. */
+  async function appendRows(token) {
+    const appendUrl = `https://${ingestHost}/v2/streaming/data/databases/${db}/schemas/${schema}/pipes/${pipe}/channels/${channel}/rows?continuationToken=${encodeURIComponent(token)}`;
+    const res = await fetch(appendUrl, {
+      method: 'POST',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify(row) + '\n',
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`append_rows failed ${res.status}: ${text}`);
+    }
+    const data = await res.json();
+    return data.next_continuation_token;
+  }
+
+  // Fast path: reuse cached channel token (1 round-trip)
+  const cached = _channelCache[pipe];
+  if (cached) {
+    try {
+      const nextToken = await appendRows(cached.token);
+      _channelCache[pipe] = { channel, token: nextToken };
+      return true;
+    } catch {
+      // Stale token or race condition — fall through to open+append
+      _channelCache[pipe] = null;
+    }
+  }
+
+  // Slow path: open channel to get a fresh token, then append (2 round-trips)
   const openUrl = `https://${ingestHost}/v2/streaming/databases/${db}/schemas/${schema}/pipes/${pipe}/channels/${channel}`;
   const openRes = await fetch(openUrl, {
     method: 'PUT',
@@ -175,29 +216,17 @@ async function streamVote(jwt, ingestHost, env, row) {
     throw new Error(`open_channel failed ${openRes.status}: ${text}`);
   }
   const { next_continuation_token } = await openRes.json();
-
-  // Step 2: Append rows as NDJSON (one row per line)
-  const appendUrl = `https://${ingestHost}/v2/streaming/data/databases/${db}/schemas/${schema}/pipes/${pipe}/channels/${channel}/rows?continuationToken=${encodeURIComponent(next_continuation_token)}`;
-  const ndjson = JSON.stringify(row) + '\n';
-
-  const appendRes = await fetch(appendUrl, {
-    method: 'POST',
-    headers: { ...authHeaders, 'Content-Type': 'application/json' },
-    body: ndjson,
-  });
-  if (!appendRes.ok) {
-    const text = await appendRes.text();
-    throw new Error(`append_rows failed ${appendRes.status}: ${text}`);
-  }
+  const nextToken = await appendRows(next_continuation_token);
+  _channelCache[pipe] = { channel, token: nextToken };
   return true;
 }
 
 /** Write voter metadata row to dim_voters (first vote per session only) */
 async function streamVoterMetadata(jwt, ingestHost, env, row) {
-  const db      = env.SNOWFLAKE_DATABASE;
-  const schema  = env.SNOWFLAKE_SCHEMA;
-  const pipe    = 'DIM_VOTERS-STREAMING';
-  const channel = `CF_VOTER_${Date.now()}_${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+  const db     = env.SNOWFLAKE_DATABASE;
+  const schema = env.SNOWFLAKE_SCHEMA;
+  const pipe   = 'DIM_VOTERS-STREAMING';
+  const channel = 'CF_VOTER_MAIN'; // fixed name — reused across requests
 
   const authHeaders = {
     Authorization: `Bearer ${jwt}`,
@@ -206,6 +235,34 @@ async function streamVoterMetadata(jwt, ingestHost, env, row) {
     'Accept': 'application/json',
   };
 
+  async function appendRows(token) {
+    const appendUrl = `https://${ingestHost}/v2/streaming/data/databases/${db}/schemas/${schema}/pipes/${pipe}/channels/${channel}/rows?continuationToken=${encodeURIComponent(token)}`;
+    const res = await fetch(appendUrl, {
+      method: 'POST',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify(row) + '\n',
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`append_rows failed ${res.status}: ${text}`);
+    }
+    const data = await res.json();
+    return data.next_continuation_token;
+  }
+
+  // Fast path: reuse cached token
+  const cached = _channelCache[pipe];
+  if (cached) {
+    try {
+      const nextToken = await appendRows(cached.token);
+      _channelCache[pipe] = { channel, token: nextToken };
+      return;
+    } catch {
+      _channelCache[pipe] = null;
+    }
+  }
+
+  // Slow path: open channel
   const openUrl = `https://${ingestHost}/v2/streaming/databases/${db}/schemas/${schema}/pipes/${pipe}/channels/${channel}`;
   const openRes = await fetch(openUrl, {
     method: 'PUT',
@@ -218,16 +275,11 @@ async function streamVoterMetadata(jwt, ingestHost, env, row) {
     return; // Non-fatal
   }
   const { next_continuation_token } = await openRes.json();
-
-  const appendUrl = `https://${ingestHost}/v2/streaming/data/databases/${db}/schemas/${schema}/pipes/${pipe}/channels/${channel}/rows?continuationToken=${encodeURIComponent(next_continuation_token)}`;
-  const appendRes = await fetch(appendUrl, {
-    method: 'POST',
-    headers: { ...authHeaders, 'Content-Type': 'application/json' },
-    body: JSON.stringify(row) + '\n',
-  });
-  if (!appendRes.ok) {
-    const errText = await appendRes.text();
-    console.warn(`streamVoterMetadata append_rows failed ${appendRes.status}:`, errText);
+  try {
+    const nextToken = await appendRows(next_continuation_token);
+    _channelCache[pipe] = { channel, token: nextToken };
+  } catch (e) {
+    console.warn('streamVoterMetadata append_rows failed (non-fatal):', e.message);
   }
 }
 
