@@ -103,6 +103,7 @@ Dashboard poll (1.5s interval)  ──►  DEMO_IWT_WH query  ──►  freshne
 - SPCS enabled (`SHOW PARAMETERS LIKE 'ENABLE_ACCOUNT_LEVEL_COMPUTE_POOL' IN ACCOUNT`)
 - Docker installed (linux/amd64 builds required for SPCS)
 - `snow` CLI installed (`pip install snowflake-cli`)
+- Snowflake authentication configured for the `snow` CLI — either a **PAT** (Programmatic Access Token) stored in a file, or a **key-pair** (`SNOWFLAKE_JWT`). Both work for `snow sql`; SPCS image registry login (`snow spcs image-registry login`) requires key-pair or username/password — not PAT.
 - Cloudflare account (Workers free tier is sufficient)
 - `wrangler` CLI (`npm install` in `cloudflare-worker/`)
 
@@ -130,30 +131,57 @@ GRANT SELECT, INSERT ON TABLE DEMO_PREDICTIONS_DB.PUBLIC.dim_voters TO ROLE DEMO
 
 ### 2. Cloudflare Worker
 
+The vote page runs as a [Cloudflare Worker](https://workers.cloudflare.com/) — a serverless function at the network edge. It serves the public vote HTML, attaches geo metadata from Cloudflare's edge, and writes votes to Snowflake via Snowpipe Streaming. No Snowflake auth is required from the audience's browser.
+
+**First-time Cloudflare setup (one per machine):**
+
+1. Create a free account at [cloudflare.com](https://cloudflare.com) if you don't have one.
+2. Log in via browser OAuth:
+   ```bash
+   cd cloudflare-worker
+   npx wrangler login
+   ```
+   This opens a browser window. Authorize `wrangler` and return to the terminal.
+
+   > **Alternative (non-interactive/CI):** Create an API token at Cloudflare Dashboard → My Profile → API Tokens with **Workers Scripts: Edit** permission, then set `CLOUDFLARE_API_TOKEN=<token>` in your environment before running `wrangler deploy`.
+
+**Install dependencies:**
+
 ```bash
 cd cloudflare-worker
 npm install
 ```
 
-Set secrets (run each command and paste value when prompted):
+**Set Cloudflare Worker secrets** (each command prompts you to paste the value):
+
 ```bash
 npx wrangler secret put SNOWFLAKE_ACCOUNT      # e.g. sfsenorthamerica-demo98
 npx wrangler secret put SNOWFLAKE_USER          # DEMO_SERVICE_USER
-npx wrangler secret put SNOWFLAKE_PRIVATE_KEY   # contents of rsa_key_pkcs8.p8
 npx wrangler secret put SNOWFLAKE_DATABASE      # DEMO_PREDICTIONS_DB
 npx wrangler secret put SNOWFLAKE_SCHEMA        # PUBLIC
 npx wrangler secret put SNOWFLAKE_ROLE          # DEMO_SERVICE_ROLE
+npx wrangler secret put SNOWFLAKE_PRIVATE_KEY   # paste full contents of rsa_key_pkcs8.p8 (including -----BEGIN/END lines)
 ```
 
-> **Note**: The RSA private key must be in PKCS#8 format. Convert with:
-> `openssl pkcs8 -topk8 -nocrypt -in rsa_key.p8 -out rsa_key_pkcs8.p8`
+> The RSA private key must be in PKCS#8 format. If you only have `rsa_key.p8` (PKCS#1), convert it first:
+> ```bash
+> openssl pkcs8 -topk8 -nocrypt -in rsa_key.p8 -out rsa_key_pkcs8.p8
+> ```
+> This is the same key pair registered to `DEMO_SERVICE_USER` in Snowflake during setup.
 
-Deploy:
+**Deploy:**
+
 ```bash
 npx wrangler deploy
 ```
 
-Copy the Worker URL (e.g. `https://demo-predictions-worker.jtaosandbox.workers.dev`) and update `PUBLIC_VOTE_URL` in `snowflake.yml`.
+The output will show your Worker URL:
+```
+Published demo-predictions-worker (<version>)
+  https://demo-predictions-worker.<your-subdomain>.workers.dev
+```
+
+**Update the SPCS service config** with the Worker URL — open `snowflake.yml` and set `PUBLIC_VOTE_URL` to the URL above. The dashboard uses this to generate the QR code that points audience members to the vote page.
 
 ### 3. Build and Push the Docker Image
 
@@ -164,15 +192,13 @@ docker build --platform linux/amd64 -t demo-predictions .
 # Tag for registry (get exact URL from SHOW IMAGE REPOSITORIES)
 docker tag demo-predictions <registry-url>/demo_predictions_db/public/demo_img_repo/predictions-api:latest
 
-# Authenticate (key-pair auth required — not PAT)
+# Authenticate — requires a PAT or key-pair connection (see Prerequisites)
 snow spcs image-registry login --connection <your-connection>
 
 docker push <registry-url>/demo_predictions_db/public/demo_img_repo/predictions-api:latest
 ```
 
-> **Registry auth gotcha**: PAT-based snow connections fail for `image-registry login`.
-> Use a key-pair (`SNOWFLAKE_JWT`) or username/password connection.
-> Always verify the exact repository name with `SHOW IMAGE REPOSITORIES IN SCHEMA DEMO_PREDICTIONS_DB.PUBLIC` before tagging.
+> Always verify the exact registry URL with `SHOW IMAGE REPOSITORIES IN SCHEMA DEMO_PREDICTIONS_DB.PUBLIC` before tagging.
 
 ### 4. Deploy the SPCS Service
 
